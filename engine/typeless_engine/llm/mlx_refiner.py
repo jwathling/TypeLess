@@ -1,7 +1,10 @@
 """MLX-LM-Refiner (Apple Silicon / Metal).
 
-Default-LLM laut Plan: ``Qwen2.5-3B-Instruct-4bit`` — leicht (~1,8 GB), schnell, gutes
-Deutsch. Qwen3-4B / 7B als opt-in Qualitätsstufen über die Konfiguration.
+Default-LLM: ``Qwen3-4B-Instruct-2507-4bit``. Der ursprünglich geplante Default
+``Qwen2.5-3B-Instruct-4bit`` ist zu schwach für den Diktat-Vertrag: Er löscht
+reproduzierbar ganze Sätze und formuliert um, obwohl der System-Prompt beides verbietet —
+auch mit deutlich verschärftem Prompt. 4B hält den Vertrag wortgetreu. 3B bleibt über die
+Konfiguration wählbar (schneller, aber inhaltlich unzuverlässig).
 
 Modell-Lifecycle für das RAM-Budget (16 GB): ``preload`` lädt das Modell (spekulativ beim
 Hotkey-Druck), ``unload`` gibt es wieder frei (Idle-Unload / Memory-Pressure). ``mlx_lm``
@@ -19,7 +22,7 @@ from ..modes import get_mode_spec
 
 _log = get_logger(__name__)
 
-DEFAULT_MODEL = "mlx-community/Qwen2.5-3B-Instruct-4bit"
+DEFAULT_MODEL = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
 
 
 class MLXRefiner(Refiner):
