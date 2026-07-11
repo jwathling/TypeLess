@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
+
 from ..interfaces import Transcriber
 from ..logging_ import get_logger
 from ..models import TARGET_SAMPLE_RATE, AudioBuffer, Transcription
@@ -18,6 +20,10 @@ from ..models import TARGET_SAMPLE_RATE, AudioBuffer, Transcription
 _log = get_logger(__name__)
 
 DEFAULT_MODEL = "mlx-community/whisper-large-v3-turbo"
+
+# Länge des Stille-Puffers für das Warm-up (0,1 s). Whisper padded ohnehin auf 30 s;
+# kürzer bringt also nichts, länger kostet nur Zeit.
+WARM_UP_SAMPLES = TARGET_SAMPLE_RATE // 10
 
 
 class MLXWhisperTranscriber(Transcriber):
@@ -37,12 +43,13 @@ class MLXWhisperTranscriber(Transcriber):
         return mlx_whisper
 
     def warm_up(self) -> None:
-        # mlx_whisper cached das Modell nach dem ersten Aufruf; ein kurzer Leerlauf-Transkript
-        # zwingt das Laden vorab. Bewusst schlank gehalten.
-        self._import_backend()
-        _log.info(
-            "MLXWhisperTranscriber bereit (Modell wird beim ersten Aufruf geladen): %s", self._model
-        )
+        # mlx_whisper cached das Modell erst ab dem ersten transcribe-Aufruf. Ein Import allein
+        # lädt nichts — die Ladezeit fiele sonst beim ersten echten Diktat an (latenzkritisch).
+        # Ein kurzer Stille-Puffer erzwingt das Laden vorab.
+        _log.info("Wärme STT-Modell auf: %s ...", self._model)
+        silence = AudioBuffer(samples=np.zeros(WARM_UP_SAMPLES, dtype=np.float32))
+        self.transcribe(silence)
+        _log.info("STT-Modell warm.")
 
     def transcribe(self, audio: AudioBuffer, *, language: str | None = None) -> Transcription:
         mlx_whisper = self._import_backend()
