@@ -116,6 +116,31 @@ def test_divergence_not_applied_to_transformative_modes() -> None:
     assert ok
 
 
+def test_self_correction_may_drop_the_wrong_half() -> None:
+    """Bei einer Selbstkorrektur MUSS Inhalt wegfallen ("Dienstag") — das ist erwünscht."""
+    src = "wir treffen uns am dienstag äh nein quatsch am mittwoch um zehn uhr"
+    out = "Wir treffen uns am Mittwoch um zehn Uhr."
+
+    ok, reason = sanity_check(src, out, Mode.DIKTAT)
+
+    assert ok, f"Aufgelöste Selbstkorrektur fälschlich verworfen: {reason}"
+
+
+def test_dropped_content_without_correction_marker_still_fails() -> None:
+    """Ohne Korrektur-Marker bleibt der Schutz streng — sonst wäre das Netz wertlos.
+
+    Der Output ist bewusst ähnlich lang wie die Eingabe, damit wirklich der Divergenz-Check
+    anschlägt und nicht schon der Längen-Check.
+    """
+    src = "wir treffen uns am dienstag im großen besprechungsraum und danach essen wir zusammen"
+    out = "Wir treffen uns am Mittwoch im großen Besprechungsraum."
+
+    ok, reason = sanity_check(src, out, Mode.DIKTAT)
+
+    assert not ok
+    assert reason is not None and "fehlt" in reason
+
+
 def test_divergence_threshold_configurable() -> None:
     src = "wir besprechen das budget und den zeitplan im meeting"
     out = "Wir besprechen das Budget im Meeting."  # "zeitplan" fehlt

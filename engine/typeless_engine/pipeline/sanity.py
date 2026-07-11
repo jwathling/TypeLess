@@ -14,6 +14,11 @@ Zwei Prüfungen, beide modusabhängig:
    unauffällig. Deshalb wird zusätzlich geprüft, wieviel inhaltliche Substanz der Eingabe
    im Output fehlt. Erlaubt bleibt, was der Modus ausdrücklich darf: Füllwörter entfernen
    (Liste unten) und Tippfehler korrigieren (unscharfer Abgleich).
+
+   **Selbstkorrekturen** ("am Dienstag, nein, am Mittwoch") sind der eine Fall, in dem
+   Diktat inhaltlich löschen *soll*. Das kollidiert mit dem Divergenz-Check, deshalb wird
+   dessen Schwelle gelockert — aber nur, wenn im Rohtext ein Korrektur-Marker steht. Ohne
+   Marker bleibt der Schutz streng; sonst wäre er wertlos.
 """
 
 from __future__ import annotations
@@ -52,6 +57,23 @@ _FILLERS = frozenset(
 # (z. B. "entwikeln" -> "entwickeln").
 _FUZZY_THRESHOLD = 0.8
 
+# Wendungen, mit denen sich Sprechende selbst korrigieren. Stehen sie im Rohtext, darf der
+# Diktat-Output mehr Inhalt weglassen (nämlich die zurückgenommene Fassung).
+_CORRECTION_MARKERS = (
+    r"nein",
+    r"quatsch",
+    r"sorry",
+    r"ich meine",
+    r"besser gesagt",
+    r"genauer gesagt",
+    r"also nicht",
+    r"korrektur",
+    r"streich das",
+)
+_CORRECTION_RE = re.compile(
+    r"(?<!\w)(?:" + "|".join(_CORRECTION_MARKERS) + r")(?!\w)", re.IGNORECASE | re.UNICODE
+)
+
 
 @dataclass(frozen=True)
 class SanityConfig:
@@ -63,6 +85,10 @@ class SanityConfig:
 
     diktat_max_missing_ratio: float = 0.05
     """Anteil der Inhaltswörter, der im Diktat-Output fehlen darf."""
+
+    diktat_max_missing_ratio_corrected: float = 0.35
+    """Wie ``diktat_max_missing_ratio``, aber wenn der Rohtext eine Selbstkorrektur enthält:
+    Dann soll die zurückgenommene Fassung ja gerade verschwinden."""
 
 
 def sanity_check(
@@ -108,17 +134,28 @@ def _divergence_check(src: str, out: str, cfg: SanityConfig) -> tuple[bool, str 
     present = _content_words(out)
     missing = [word for word in expected if not _is_present(word, present)]
 
+    corrected = _CORRECTION_RE.search(src) is not None
+    limit = cfg.diktat_max_missing_ratio_corrected if corrected else cfg.diktat_max_missing_ratio
+
     missing_ratio = len(missing) / len(expected)
-    if missing_ratio > cfg.diktat_max_missing_ratio:
+    if missing_ratio > limit:
         preview = ", ".join(sorted(missing)[:5])
         return False, f"Diktat-Output fehlt Inhalt ({missing_ratio:.0%}): {preview}"
     return True, None
 
 
 def _content_words(text: str) -> set[str]:
-    """Extrahiert die bedeutungstragenden Wörter (ohne Füllwörter und Funktionswörter)."""
+    """Extrahiert die bedeutungstragenden Wörter.
+
+    Ausgenommen sind Funktionswörter (zu kurz), Füllwörter und Korrektur-Wendungen: Sie alle
+    dürfen im Diktat-Output verschwinden, ohne dass Inhalt verloren geht.
+    """
     words = re.findall(r"\w+", text.lower(), flags=re.UNICODE)
-    return {w for w in words if len(w) >= _MIN_CONTENT_LENGTH and w not in _FILLERS}
+    return {
+        w
+        for w in words
+        if len(w) >= _MIN_CONTENT_LENGTH and w not in _FILLERS and not _CORRECTION_RE.fullmatch(w)
+    }
 
 
 def _is_present(word: str, candidates: set[str]) -> bool:
