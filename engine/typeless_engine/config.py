@@ -19,6 +19,7 @@ from .stt.mlx_whisper import DEFAULT_MODEL as DEFAULT_STT_MODEL
 # Standard-Speicherort für nutzerbezogene Daten (Wörterbuch etc.).
 APP_SUPPORT_DIR = Path.home() / "Library" / "Application Support" / "TypeLess"
 DEFAULT_DICTIONARY_PATH = APP_SUPPORT_DIR / "dictionary.json"
+DEFAULT_SOCKET_PATH = APP_SUPPORT_DIR / "typeless.sock"
 
 Backend = Literal["mlx", "mock"]
 
@@ -38,5 +39,14 @@ class EngineConfig(BaseSettings):
     default_mode: Mode = Mode.DIKTAT
 
     dictionary_path: Path = Field(default=DEFAULT_DICTIONARY_PATH)
+
+    socket_path: Path = Field(default=DEFAULT_SOCKET_PATH)
+    """Unix-Domain-Socket, über den die Swift-App den Sidecar anspricht (kein TCP-Port)."""
+
+    idle_unload_seconds: float = 300.0
+    """Nach so langer Untätigkeit wird das LLM entladen. Das STT bleibt warm."""
+
+    idle_check_interval_seconds: float = 10.0
+    """Wie oft der Idle-Wächter prüft."""
 
     log_level: str = "INFO"
