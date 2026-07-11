@@ -17,6 +17,9 @@ dependencies = [
 mlx = [
     "mlx-whisper>=0.4",
     "mlx-lm>=0.19",
+    # Transitiv über mlx-whisper. Ohne Untergrenze deckelt der Resolver numba (verlangt
+    # numpy<2.5) statt numpy und landet bei numba 0.53, das auf Python 3.11 nicht baut.
+    "numba>=0.62",
 ]
 # Sidecar-Server (M2).
 server = [
