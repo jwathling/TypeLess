@@ -92,14 +92,16 @@ fertig (gemessen: 3,9 s) — die Ladezeit verschwindet hinter dem Sprechen.
 Wird beim **Loslassen** des Hotkeys gerufen.
 
 ```
-POST /process?mode=diktat[&language=de]
+POST /process?mode=diktat[&language=de][&sample_rate=16000]
 Content-Type: application/octet-stream
 
 <Float32LE-Samples, 16 kHz, mono>
 ```
 
 `mode` ist Pflicht und einer aus `diktat|prompt|email|slack|braindump`. `language` ist
-optional; fehlt es, gilt Auto-Detect (empfohlen für DE+EN gemischt).
+optional; fehlt es, gilt Auto-Detect (empfohlen für DE+EN gemischt). `sample_rate` ist
+optional (Default 16000) — die Rate steht nicht in den Rohdaten und muss deshalb
+mitgeschickt werden, damit die Strenge unten überhaupt prüfbar ist.
 
 Antwort `200` — die Felder spiegeln `ProcessResult` aus M1:
 
@@ -141,6 +143,7 @@ gerade verarbeitet wird — ein Unload darf nie in eine laufende Generierung fal
 | Unbekannter Modus | `400` | Validierung vor jedem Modellzugriff. |
 | Leerer Body | `400` | — |
 | Bytelänge kein Vielfaches von 4 | `400` | Keine gültigen Float32-Samples. |
+| `sample_rate` ≠ 16000 | `400` | Kein stiller Resample-Fallback. |
 | **LLM scheitert** (Laden oder Generierung) | **`200`**, `refined: false`, `fallback_reason` gesetzt, `final_text` = wörterbuch-bereinigter Rohtext | Der Text liegt vor. Ihn wegzuwerfen wäre der schlechtere Ausgang. |
 | **STT scheitert** | `500` | Es gibt keinen Text, den man retten könnte. Swift zeigt den Fehler im Overlay. |
 
