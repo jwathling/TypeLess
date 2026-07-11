@@ -58,7 +58,20 @@ MODES: dict[Mode, ModeSpec] = {
             "Rechtschreibung, Grammatik und Zeichensetzung. Ändere weder Wortwahl noch Stil, "
             "Inhalt oder Bedeutung. Füge nichts hinzu und lasse nichts weg. Entferne lediglich "
             "offensichtliche Sprech-Disfluenzen (z. B. 'ähm', 'äh', doppelte Wörter), wenn sie "
-            "klar unbeabsichtigt sind. Setze sinnvolle Absätze und Satzzeichen."
+            "klar unbeabsichtigt sind. Setze sinnvolle Absätze und Satzzeichen.\n\n"
+            # Die Beispiele sind nicht schmückend: Ohne sie löst 4B nur die auffälligste
+            # Korrektur ('nein, Quatsch') auf und lässt 'ich meine' / 'also nicht' stehen.
+            "Einzige Ausnahme von 'nichts weglassen': SELBSTKORREKTUREN. Nimmt die sprechende "
+            "Person etwas zurück und sagt es neu, dann behalte NUR die zweite (korrigierte) "
+            "Fassung. Die erste Fassung und die Korrektur-Wendung selbst fallen ersatzlos weg.\n\n"
+            "Beispiele:\n"
+            "Eingabe: wir treffen uns am dienstag äh nein quatsch am mittwoch\n"
+            "Ausgabe: Wir treffen uns am Mittwoch.\n\n"
+            "Eingabe: wir brauchen zehn lizenzen ich meine zwölf lizenzen\n"
+            "Ausgabe: Wir brauchen zwölf Lizenzen.\n\n"
+            "Eingabe: schick das an tim also nicht an tim an tom\n"
+            "Ausgabe: Schick das an Tom.\n\n"
+            "Nur bei echter Rücknahme. Ist unklar, ob korrigiert wurde, behalte beide Fassungen."
         ),
     ),
     Mode.PROMPT: ModeSpec(
