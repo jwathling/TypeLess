@@ -24,8 +24,10 @@ Audio ──Transcriber──▶ Rohtext ──Wörterbuch──▶ bereinigt �
 ## Kernentscheidungen (verbindlich)
 
 - **STT:** `mlx-whisper` mit `whisper-large-v3-turbo` (Auto-Detect für DE+EN gemischt).
-- **LLM:** `mlx-lm` mit `Qwen2.5-3B-Instruct-4bit` als **Default** (leicht wegen RAM);
-  Qwen3-4B / 7B als opt-in Qualitätsstufen über `EngineConfig`.
+- **LLM:** `mlx-lm` mit `Qwen3-4B-Instruct-2507-4bit` als **Default**. Der ursprünglich
+  geplante 3B-Default ist **verworfen**: Er löscht im Diktat-Modus reproduzierbar ganze
+  Sätze und formuliert um — auch mit verschärftem Prompt (in M1 gemessen). 3B/7B bleiben
+  über `EngineConfig` wählbar.
 - **RAM-Strategie (16 GB):** STT warm halten, LLM **on-demand** (spekulativer Preload beim
   Hotkey-Druck + Idle-Unload + Memory-Pressure-Handling). Nie beide dauerhaft resident.
 - **Text-Einfügen (ab M5):** primär `CGEventKeyboardSetUnicodeString` (universell, **ohne
@@ -67,20 +69,30 @@ Persönliches Wörterbuch (deterministisch, vor dem LLM): JSON unter
 ## Aktueller Stand
 
 - [x] **M1** — Engine-Kern: Interfaces, Wörterbuch, Modi (Diktat/Prompt/Email/Slack/
-  BrainDump), Pipeline + Sanity-Check, MLX-Backends (lazy) + Mocks, CLI. 32 Tests grün,
-  ruff/mypy(strict)/black sauber. Commit `7880cb6`, gemerged auf `main`.
+  BrainDump), Pipeline + Sanity-Check (Länge **und** Divergenz), MLX-Backends (lazy) +
+  Mocks, CLI. 41 Tests grün, ruff/mypy(strict)/black sauber.
+- [x] **M1 auf echten Modellen verifiziert** (Apple Silicon, s. „Messwerte" unten).
 - [ ] **M2** — Sidecar-Server: FastAPI/uvicorn über **Unix-Domain-Socket**, Endpunkte
   `/health`, `/preload` (LLM vorladen), `/process` (PCM+Modus → Text), `/unload`.
   STT warm beim Start, LLM on-demand. Logging.
 - [ ] **M3** Swift-Shell · **M4** Audio+Hotkey+Overlay · **M5** Einfügen · **M6** Modi-
   Umschalter · **M7** Settings-UI · **M8** Polish/Packaging.
 
-## Bekannte offene Verifikation
+## Messwerte (M1, Apple Silicon, 16 GB)
 
-⚠️ **`mlx_lm.generate`-API** in `engine/typeless_engine/llm/mlx_refiner.py` ist gegen die
-tatsächlich installierte `mlx-lm`-Version zu prüfen (Signatur `sampler=` vs. `temp=` hat
-sich zwischen Versionen geändert). Bei Fehlern zu `sampler`/`make_sampler`/`generate()`:
-Signatur an die installierte Version anpassen (`uv pip show mlx-lm`).
+Speicher laut MLX-API (`mx.get_active_memory()`; **RSS ist irreführend**, da MLX die
+Gewichte per mmap lädt):
+
+| Zustand | Speicher | Plan-Annahme |
+|---|---|---|
+| Idle (nur STT warm) | **1,51 GB** | 2,0–2,5 GB |
+| Peak (STT + LLM 4B) | **3,62 GB** | 4,0–4,5 GB |
+| Nach LLM-Unload | 1,51 GB | — |
+
+Latenz: STT ≈ **0,17× Echtzeit** (48 s Audio → 8,4 s). LLM-Preload 3,9 s (gecacht),
+Refine 3,2–3,6 s. Für ein 15-s-Diktat also grob 2,6 s STT + ~3,5 s LLM. Das Planziel von
+2–4 s nach dem Loslassen wird damit **nicht** erreicht (eher 6 s); der spekulative Preload
+verdeckt nur die Ladezeit, nicht die Generierung. Optimierung → M8.
 
 ## Konventionen
 
