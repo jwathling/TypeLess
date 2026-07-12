@@ -6,6 +6,7 @@ Läuft vollständig ohne MLX: Die Bausteine werden als Test-Doubles injiziert.
 from __future__ import annotations
 
 import asyncio
+import threading
 
 import numpy as np
 import pytest
@@ -37,14 +38,24 @@ class SpyTranscriber(Transcriber):
 
 
 class SpyRefiner(Refiner):
-    """Zählt Preloads/Unloads; kann beim Laden oder beim Generieren scheitern."""
+    """Zählt Preloads/Unloads/gleichzeitige Aufrufe; kann beim Laden oder Generieren scheitern.
+
+    ``max_concurrent`` und ``preloads`` sind die beiden Signale, mit denen sich fehlende
+    Serialisierung in ``EngineRuntime.process`` nachweisen lässt: Ohne Lock würden zwei
+    gleichzeitige ``process``-Aufrufe beide ``_llm_loaded is False`` sehen (bevor die erste
+    Coroutine beim Thread-Wechsel yieldet) und beide ``preload()`` aufrufen; und ihre
+    ``refine()``-Aufrufe liefen im Worker-Thread parallel statt nacheinander.
+    """
 
     def __init__(self, fail_preload: bool = False, fail_refine: bool = False) -> None:
         self.preloads = 0
         self.unloads = 0
         self.refines = 0
+        self.in_flight = 0
+        self.max_concurrent = 0
         self._fail_preload = fail_preload
         self._fail_refine = fail_refine
+        self._in_flight_lock = threading.Lock()
 
     def preload(self) -> None:
         if self._fail_preload:
@@ -55,13 +66,20 @@ class SpyRefiner(Refiner):
         self.unloads += 1
 
     def refine(self, text: str, mode: Mode, *, language: str | None = None) -> str:
-        self.refines += 1
-        if self._fail_refine:
-            raise RuntimeError("Generierung kaputt")
-        # Nur den ersten Buchstaben großschreiben (nicht ``str.capitalize()``, das den Rest
-        # der Zeichenkette kleinschreiben und damit die kanonische Wörterbuch-Schreibweise
-        # wie "HubSpot" zerstören würde).
-        return text[:1].upper() + text[1:] + "."
+        with self._in_flight_lock:
+            self.in_flight += 1
+            self.max_concurrent = max(self.max_concurrent, self.in_flight)
+        try:
+            self.refines += 1
+            if self._fail_refine:
+                raise RuntimeError("Generierung kaputt")
+            # Nur den ersten Buchstaben großschreiben (nicht ``str.capitalize()``, das den
+            # Rest der Zeichenkette kleinschreiben und damit die kanonische
+            # Wörterbuch-Schreibweise wie "HubSpot" zerstören würde).
+            return text[:1].upper() + text[1:] + "."
+        finally:
+            with self._in_flight_lock:
+                self.in_flight -= 1
 
 
 @pytest.fixture
@@ -147,7 +165,13 @@ async def test_process_waits_for_startup() -> None:
 
 @pytest.mark.anyio
 async def test_concurrent_process_calls_are_serialized() -> None:
-    runtime = make_runtime()
+    """Ohne den Lock in ``EngineRuntime.process`` wäre dieser Test auch grün — die beiden
+    Ergebnisse kämen trotzdem korrekt zurück. Die eigentliche Serialisierung zeigt sich erst
+    an ``llm.preloads`` (ohne Lock: 2, weil beide Coroutinen ``_llm_loaded is False`` sehen,
+    bevor die erste beim Thread-Wechsel yieldet) und an ``llm.max_concurrent`` (ohne Lock: 2,
+    weil beide ``refine()``-Aufrufe im Worker-Thread gleichzeitig liefen)."""
+    llm = SpyRefiner()
+    runtime = make_runtime(refiner=llm)
     await runtime.startup()
 
     results = await asyncio.gather(
@@ -158,6 +182,8 @@ async def test_concurrent_process_calls_are_serialized() -> None:
     assert len(results) == 2
     for result in results:
         assert "HubSpot" in result.final_text
+    assert llm.preloads == 1
+    assert llm.max_concurrent == 1
 
 
 @pytest.mark.anyio
