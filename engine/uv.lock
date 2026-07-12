@@ -1984,6 +1984,7 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
+    { name = "anyio" },
     { name = "black" },
     { name = "fastapi" },
     { name = "httpx" },
@@ -1998,12 +1999,15 @@ mlx = [
     { name = "numba" },
 ]
 server = [
+    { name = "anyio" },
     { name = "fastapi" },
     { name = "uvicorn" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", marker = "extra == 'dev'", specifier = ">=4.0" },
+    { name = "anyio", marker = "extra == 'server'", specifier = ">=4.0" },
     { name = "black", marker = "extra == 'dev'", specifier = ">=24.0" },
     { name = "fastapi", marker = "extra == 'dev'", specifier = ">=0.110" },
     { name = "fastapi", marker = "extra == 'server'", specifier = ">=0.110" },

@@ -65,7 +65,13 @@ class _ResilientRefiner(Refiner):
             _log.warning("%s", self.last_error)
 
     def unload(self) -> None:
-        self._inner.unload()
+        try:
+            self._inner.unload()
+        except Exception as exc:  # noqa: BLE001 - jeder Backend-Fehler ist hier gleichwertig
+            # Nicht propagieren: Der Aufrufer (EngineRuntime.unload) setzt den Zustand danach
+            # unbedingt auf "nicht geladen" — ein zweiter Unload-Versuch würde am halb
+            # freigegebenen Modell ohnehin nichts mehr reparieren.
+            _log.warning("LLM konnte nicht sauber freigegeben werden: %s", exc)
 
     def refine(self, text: str, mode: Mode, *, language: str | None = None) -> str:
         if self.last_error is not None:
