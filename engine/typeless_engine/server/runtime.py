@@ -34,12 +34,21 @@ _log = get_logger(__name__)
 class HealthState:
     """Momentaufnahme des Sidecar-Zustands (Antwort auf ``/health``)."""
 
-    status: str  # "starting" | "ready"
+    status: str  # "starting" | "ready" | "failed"
     stt_loaded: bool
     llm_loaded: bool
     busy: bool
     stt_model: str
     llm_model: str
+    error: str | None = None  # Grund, falls ``status == "failed"``; sonst None
+
+
+class StartupFailedError(RuntimeError):
+    """Das STT-Warm-up ist gescheitert — der Sidecar wird nie einsatzbereit.
+
+    Eigener Typ, damit die HTTP-Schicht diesen Zustand (503, Dienst nicht verfügbar) von einem
+    echten Verarbeitungsfehler (500) unterscheiden kann.
+    """
 
 
 class _ResilientRefiner(Refiner):
@@ -104,8 +113,16 @@ class EngineRuntime:
         self._clock = clock
 
         self._lock = asyncio.Lock()
+        # Gate für "Start abgeschlossen" — gesetzt wird es in *beiden* Fällen: nach einem
+        # erfolgreichen Warm-up und nach einem gescheiterten. Sonst warteten die
+        # ``process()``-Aufrufer bei einem kaputten Modell für immer (siehe ``startup``).
         self._ready = asyncio.Event()
+        self._startup_error: str | None = None
         self._llm_loaded = False
+        # Nur "es wird gerade ein Diktat verarbeitet" — bewusst nicht ``self._lock.locked()``:
+        # Den Lock hält auch ein reines ``/preload``, und die Swift-Shell (M3) hängt ihr Overlay
+        # an ``busy``; es darf beim bloßen Hotkey-Druck nicht aufblitzen.
+        self._busy = False
         self._last_used = clock()
         self._idle_task: asyncio.Task[None] | None = None
 
@@ -123,21 +140,42 @@ class EngineRuntime:
 
     def health(self) -> HealthState:
         """Sofort beantwortbar — nimmt bewusst keinen Lock."""
+        if self._startup_error is not None:
+            status = "failed"
+        elif self._ready.is_set():
+            status = "ready"
+        else:
+            status = "starting"
         return HealthState(
-            status="ready" if self._ready.is_set() else "starting",
-            stt_loaded=self._ready.is_set(),
+            status=status,
+            stt_loaded=self._ready.is_set() and self._startup_error is None,
             llm_loaded=self._llm_loaded,
-            busy=self._lock.locked(),
+            busy=self._busy,
             stt_model=self._config.stt_model,
             llm_model=self._config.llm_model,
+            error=self._startup_error,
         )
 
     # ---- Lebenszyklus -------------------------------------------------------
 
     async def startup(self) -> None:
-        """Lädt das STT warm. Bis dahin meldet ``/health`` ``starting``."""
+        """Lädt das STT warm. Bis dahin meldet ``/health`` ``starting``.
+
+        Scheitert das Laden (kaputter Modell-Cache, falsche Modell-ID, kein Netz beim ersten
+        Download), wird der Grund festgehalten **und das Ready-Gate trotzdem geöffnet**: Sonst
+        bliebe ``/health`` für immer auf ``starting`` und jede ``/process``-Anfrage hinge
+        endlos — ein Zombie, den die Swift-Shell nicht von "lädt noch" unterscheiden könnte.
+        Der Fehler wird danach weitergereicht, damit der Aufrufer ihn protokollieren kann.
+        """
         _log.info("Wärme STT auf ...")
-        await to_thread.run_sync(self._transcriber.warm_up)
+        try:
+            await to_thread.run_sync(self._transcriber.warm_up)
+        except asyncio.CancelledError:
+            raise  # Regulärer Shutdown während des Warm-ups — kein Startfehler.
+        except Exception as exc:
+            self._startup_error = f"STT-Warm-up fehlgeschlagen: {exc}"
+            self._ready.set()  # Wartende wecken — sie scheitern gleich mit StartupFailedError.
+            raise
         self._ready.set()
         _log.info("Sidecar bereit.")
 
@@ -147,6 +185,11 @@ class EngineRuntime:
             await self._preload_unlocked()
 
     async def _preload_unlocked(self) -> None:
+        # Zuerst die Uhr: Ein Hotkey-Druck ist eine Nutzung, auch wenn nichts zu laden ist.
+        # Stünde das hinter dem Early-Return, frischte ein ``/preload`` bei bereits geladenem
+        # LLM die Frist nicht auf — der Idle-Wächter könnte das Modell dann mitten im Diktat
+        # entladen, also genau in dem Moment, für den ``/preload`` überhaupt existiert.
+        self._last_used = self._clock()
         if self._llm_loaded:
             return
         self._refiner.reset()
@@ -206,7 +249,16 @@ class EngineRuntime:
     async def _idle_loop(self) -> None:
         while True:
             await asyncio.sleep(self._config.idle_check_interval_seconds)
-            await self.maybe_idle_unload()
+            try:
+                await self.maybe_idle_unload()
+            except asyncio.CancelledError:
+                raise  # Regulärer Shutdown — nicht verschlucken.
+            except Exception:  # noqa: BLE001 - ein Fehlschlag darf den Wächter nicht töten
+                # Ohne diesen Guard stürbe der Task lautlos (nie wieder ein Idle-Unload), und
+                # ``stop_idle_watcher()`` würfe die gespeicherte Exception beim Herunterfahren
+                # aus ``shutdown()`` heraus erneut: ``cancel()`` ist auf einem bereits beendeten
+                # Task ein No-op, das anschließende ``await`` re-raist dann.
+                _log.exception("Idle-Wächter: Durchlauf fehlgeschlagen — läuft weiter.")
 
     async def shutdown(self) -> None:
         """Fährt sauber herunter: Wächter stoppen, LLM freigeben."""
@@ -224,21 +276,33 @@ class EngineRuntime:
         den Kontext oft besser als der Default). Ohne Angabe gilt weiter
         ``EngineConfig.language`` — dessen Default ``None`` bedeutet Auto-Detect und ist für
         gemischt Deutsch/Englisch die empfohlene Einstellung.
+
+        Raises:
+            StartupFailedError: Wenn das STT-Warm-up gescheitert ist. Das Warten hat dann kein
+                Ziel mehr — der Aufrufer bekommt sofort eine klare Absage statt eines Hängers.
         """
         await self._ready.wait()
+        if self._startup_error is not None:
+            raise StartupFailedError(self._startup_error)
         effective_language = language if language is not None else self._config.language
         async with self._lock:
-            self._refiner.reset()
-            await self._preload_unlocked()
+            self._busy = True
+            try:
+                self._refiner.reset()
+                await self._preload_unlocked()
 
-            result = await to_thread.run_sync(self._run_pipeline, audio, mode, effective_language)
-            self._last_used = self._clock()
+                result = await to_thread.run_sync(
+                    self._run_pipeline, audio, mode, effective_language
+                )
+                self._last_used = self._clock()
 
-            if self._refiner.last_error is not None:
-                # Der Sanity-Check hat bereits auf den Rohtext zurückgefallen; wir ersetzen
-                # nur seinen generischen Grund ("leerer LLM-Output") durch den echten.
-                result = replace(result, fallback_reason=self._refiner.last_error)
-            return result
+                if self._refiner.last_error is not None:
+                    # Der Sanity-Check hat bereits auf den Rohtext zurückgefallen; wir ersetzen
+                    # nur seinen generischen Grund ("leerer LLM-Output") durch den echten.
+                    result = replace(result, fallback_reason=self._refiner.last_error)
+                return result
+            finally:
+                self._busy = False
 
     def _run_pipeline(self, audio: AudioBuffer, mode: Mode, language: str | None) -> ProcessResult:
         """Blockierender Teil — läuft im Worker-Thread."""

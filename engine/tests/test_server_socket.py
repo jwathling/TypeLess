@@ -146,6 +146,24 @@ def test_prepare_socket_path_creates_missing_directory(socket_dir: Path) -> None
     assert socket_path.parent.stat().st_mode & 0o777 == 0o700
 
 
+def test_prepare_socket_path_tightens_an_existing_directory(socket_dir: Path) -> None:
+    """Der ``mode`` des ``mkdir`` wirkt nur beim *Anlegen* — hier existiert das Verzeichnis schon.
+
+    Genau der Normalfall: ``~/Library/Application Support/TypeLess`` stammt aus M1 (dort liegt
+    das Wörterbuch) und trägt dessen lockerere Rechte. Ohne ein unbedingtes ``chmod`` bliebe der
+    Socket damit für andere Nutzer des Rechners erreichbar — und die Verzeichnisrechte sind laut
+    Spec die einzige Zugangskontrolle des Sidecars.
+    """
+    socket_path = socket_dir / "vorhanden" / "typeless.sock"
+    socket_path.parent.mkdir(parents=True)
+    socket_path.parent.chmod(0o755)  # z. B. aus M1 übrig geblieben
+    assert socket_path.parent.stat().st_mode & 0o777 == 0o755
+
+    prepare_socket_path(socket_path)
+
+    assert socket_path.parent.stat().st_mode & 0o777 == 0o700
+
+
 # ---- Server über den echten Socket ------------------------------------------
 
 
