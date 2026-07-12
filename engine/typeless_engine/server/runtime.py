@@ -215,14 +215,23 @@ class EngineRuntime:
 
     # ---- Verarbeitung -------------------------------------------------------
 
-    async def process(self, audio: AudioBuffer, mode: Mode) -> ProcessResult:
-        """Audio -> fertiger Text. Serialisiert; wartet auf das STT-Warm-up."""
+    async def process(
+        self, audio: AudioBuffer, mode: Mode, *, language: str | None = None
+    ) -> ProcessResult:
+        """Audio -> fertiger Text. Serialisiert; wartet auf das STT-Warm-up.
+
+        ``language`` überschreibt für diesen einen Aufruf die Konfiguration (der Client kennt
+        den Kontext oft besser als der Default). Ohne Angabe gilt weiter
+        ``EngineConfig.language`` — dessen Default ``None`` bedeutet Auto-Detect und ist für
+        gemischt Deutsch/Englisch die empfohlene Einstellung.
+        """
         await self._ready.wait()
+        effective_language = language if language is not None else self._config.language
         async with self._lock:
             self._refiner.reset()
             await self._preload_unlocked()
 
-            result = await to_thread.run_sync(self._run_pipeline, audio, mode)
+            result = await to_thread.run_sync(self._run_pipeline, audio, mode, effective_language)
             self._last_used = self._clock()
 
             if self._refiner.last_error is not None:
@@ -231,7 +240,7 @@ class EngineRuntime:
                 result = replace(result, fallback_reason=self._refiner.last_error)
             return result
 
-    def _run_pipeline(self, audio: AudioBuffer, mode: Mode) -> ProcessResult:
+    def _run_pipeline(self, audio: AudioBuffer, mode: Mode, language: str | None) -> ProcessResult:
         """Blockierender Teil — läuft im Worker-Thread."""
         return process(
             audio,
@@ -239,5 +248,5 @@ class EngineRuntime:
             transcriber=self._transcriber,
             refiner=self._refiner,
             dictionary=self._dictionary,
-            config=PipelineConfig(language=self._config.language),
+            config=PipelineConfig(language=language),
         )

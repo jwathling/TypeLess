@@ -51,6 +51,11 @@ def create_app(runtime: EngineRuntime) -> FastAPI:
     """Baut die FastAPI-App über einer bereits konstruierten Runtime."""
     app = FastAPI(title="TypeLess Sidecar", docs_url=None, redoc_url=None)
 
+    # Referenzen auf laufende Preload-Tasks. Ohne sie hält nichts den Task am Leben: Der
+    # Event-Loop führt nur schwache Referenzen, der Garbage Collector darf einen Task also
+    # mitten in der Ausführung einsammeln (so dokumentiert bei ``asyncio.create_task``).
+    preload_tasks: set[asyncio.Task[None]] = set()
+
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
         """Antwortet immer sofort — auch während einer laufenden Verarbeitung."""
@@ -67,7 +72,9 @@ def create_app(runtime: EngineRuntime) -> FastAPI:
     @app.post("/preload", status_code=202)
     async def preload() -> Response:
         """Spekulativer Vorlauf beim Hotkey-Druck: startet das Laden und kehrt sofort zurück."""
-        asyncio.create_task(runtime.preload())  # noqa: RUF006 - bewusst fire-and-forget
+        task = asyncio.create_task(runtime.preload())
+        preload_tasks.add(task)
+        task.add_done_callback(preload_tasks.discard)
         return Response(status_code=202)
 
     @app.post("/unload", response_model=HealthResponse)
@@ -88,7 +95,11 @@ def create_app(runtime: EngineRuntime) -> FastAPI:
         language: Annotated[str | None, Query()] = None,
         sample_rate: Annotated[int, Query()] = TARGET_SAMPLE_RATE,
     ) -> ProcessResponse:
-        """Rohes Float32-PCM (16 kHz mono) -> fertiger Text."""
+        """Rohes Float32-PCM (16 kHz mono) -> fertiger Text.
+
+        ``language`` ist optional und hat Vorrang vor der Konfiguration; ohne Angabe bleibt es
+        beim konfigurierten Wert (Default: Auto-Detect).
+        """
         buffer = _decode_pcm(audio, sample_rate)
         try:
             parsed_mode = Mode.from_string(mode)
@@ -96,7 +107,7 @@ def create_app(runtime: EngineRuntime) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         try:
-            result = await runtime.process(buffer, parsed_mode)
+            result = await runtime.process(buffer, parsed_mode, language=language)
         except Exception as exc:  # noqa: BLE001 - ohne Transkription gibt es nichts zu retten
             _log.exception("Verarbeitung fehlgeschlagen")
             raise HTTPException(

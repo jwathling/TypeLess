@@ -24,6 +24,7 @@ class SpyTranscriber(Transcriber):
     def __init__(self, text: str = "hot spot ist super", fail: bool = False) -> None:
         self.warm_ups = 0
         self.calls = 0
+        self.last_language: str | None = None  # zuletzt durchgereichte Sprache
         self._text = text
         self._fail = fail
 
@@ -32,6 +33,7 @@ class SpyTranscriber(Transcriber):
 
     def transcribe(self, audio: AudioBuffer, *, language: str | None = None) -> Transcription:
         self.calls += 1
+        self.last_language = language
         if self._fail:
             raise RuntimeError("STT kaputt")
         return Transcription(text=self._text, language="de", duration_seconds=1.0)
@@ -144,6 +146,20 @@ async def test_process_without_preload_loads_llm() -> None:
     # Wörterbuch greift vor dem LLM:
     assert "HubSpot" in result.dictionary_text
     assert "HubSpot" in result.final_text
+
+
+@pytest.mark.anyio
+async def test_process_language_overrides_config() -> None:
+    """Eine explizit übergebene Sprache hat Vorrang; ohne Angabe bleibt es beim Default."""
+    stt = SpyTranscriber()
+    runtime = make_runtime(transcriber=stt)
+    await runtime.startup()
+
+    await runtime.process(audio(), Mode.DIKTAT)
+    assert stt.last_language is None  # Default der EngineConfig: Auto-Detect
+
+    await runtime.process(audio(), Mode.DIKTAT, language="en")
+    assert stt.last_language == "en"
 
 
 @pytest.mark.anyio
