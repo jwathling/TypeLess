@@ -157,21 +157,38 @@ class EngineRuntime:
     async def unload(self) -> None:
         """Gibt das LLM frei. Wartet, falls gerade verarbeitet wird."""
         async with self._lock:
-            if not self._llm_loaded:
-                return
-            await to_thread.run_sync(self._refiner.unload)
-            self._llm_loaded = False
+            await self._unload_unlocked()
+
+    async def _unload_unlocked(self) -> None:
+        if not self._llm_loaded:
+            return
+        await to_thread.run_sync(self._refiner.unload)
+        self._llm_loaded = False
 
     async def maybe_idle_unload(self) -> bool:
-        """Entlädt das LLM, wenn es lange genug ungenutzt war. Liefert True, wenn entladen."""
-        if not self._llm_loaded:
-            return False
-        idle_for = self._clock() - self._last_used
-        if idle_for < self._config.idle_unload_seconds:
-            return False
-        _log.info("LLM seit %.0fs ungenutzt — entlade.", idle_for)
-        await self.unload()
-        return True
+        """Entlädt das LLM, wenn es lange genug ungenutzt war. Liefert True, wenn entladen.
+
+        Frist-Prüfung und Entladen laufen atomar unter demselben Lock (TOCTOU-Fix): Würde
+        ``idle_for`` — wie zuvor — außerhalb des Locks gelesen, könnte zwischen dieser
+        Prüfung und dem eigentlichen Entladen ein ``process()``-Aufruf den Lock nehmen,
+        ``_last_used`` auf „jetzt" aktualisieren und wieder freigeben; der anschließende
+        ``unload()`` würde das dann trotzdem entladen, weil er nur noch ``_llm_loaded``
+        prüft, nicht mehr die (inzwischen veraltete) Frist. Der Lock allein verhindert zwar
+        zuverlässig, dass ein Entladen in eine laufende Generierung fällt — er verhindert
+        aber nicht, dass die Freigabe auf einer bereits überholten Frist basiert. Deshalb
+        hier — wie bei ``preload``/``_preload_unlocked`` — eine ``_unlocked``-Variante, die
+        aus dem bereits gehaltenen Lock heraus aufgerufen wird, statt des reentrant nicht
+        möglichen ``unload()``.
+        """
+        async with self._lock:
+            if not self._llm_loaded:
+                return False
+            idle_for = self._clock() - self._last_used
+            if idle_for < self._config.idle_unload_seconds:
+                return False
+            _log.info("LLM seit %.0fs ungenutzt — entlade.", idle_for)
+            await self._unload_unlocked()
+            return True
 
     def start_idle_watcher(self) -> None:
         """Startet den Hintergrund-Wächter, der periodisch ``maybe_idle_unload`` ruft."""
