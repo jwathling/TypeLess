@@ -83,3 +83,10 @@ markers = [
     "slow: Tests, die echte MLX-Modelle laden (nur Apple Silicon).",
 ]
 testpaths = ["tests"]
+# Kurzes, festes Basisverzeichnis für `tmp_path`: macOS legt sein Standard-Temp-Verzeichnis
+# in einem tief verschachtelten, pro Boot zufälligen Pfad an
+# (`/private/var/folders/.../T/pytest-of-.../pytest-N/<testname>/`). In Kombination mit
+# längeren Testnamen überschreitet ein darunter angelegter Unix-Domain-Socket regelmäßig das
+# Limit von `sockaddr_un.sun_path` (104 Byte auf macOS) — unabhängig vom getesteten Code
+# (siehe test_server_socket.py::test_server_speaks_over_a_real_unix_socket).
+addopts = "--basetemp=/tmp/typeless-pytest"
