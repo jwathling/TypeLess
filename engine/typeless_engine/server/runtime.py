@@ -12,6 +12,7 @@ geladen und im Leerlauf wieder freigegeben (Peak mit LLM: 3,62 GB).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -106,6 +107,7 @@ class EngineRuntime:
         self._ready = asyncio.Event()
         self._llm_loaded = False
         self._last_used = clock()
+        self._idle_task: asyncio.Task[None] | None = None
 
     @classmethod
     def from_config(cls, config: EngineConfig) -> EngineRuntime:
@@ -160,8 +162,38 @@ class EngineRuntime:
             await to_thread.run_sync(self._refiner.unload)
             self._llm_loaded = False
 
+    async def maybe_idle_unload(self) -> bool:
+        """Entlädt das LLM, wenn es lange genug ungenutzt war. Liefert True, wenn entladen."""
+        if not self._llm_loaded:
+            return False
+        idle_for = self._clock() - self._last_used
+        if idle_for < self._config.idle_unload_seconds:
+            return False
+        _log.info("LLM seit %.0fs ungenutzt — entlade.", idle_for)
+        await self.unload()
+        return True
+
+    def start_idle_watcher(self) -> None:
+        """Startet den Hintergrund-Wächter, der periodisch ``maybe_idle_unload`` ruft."""
+        if self._idle_task is None:
+            self._idle_task = asyncio.create_task(self._idle_loop())
+
+    async def stop_idle_watcher(self) -> None:
+        if self._idle_task is None:
+            return
+        self._idle_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._idle_task
+        self._idle_task = None
+
+    async def _idle_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self._config.idle_check_interval_seconds)
+            await self.maybe_idle_unload()
+
     async def shutdown(self) -> None:
-        """Fährt sauber herunter."""
+        """Fährt sauber herunter: Wächter stoppen, LLM freigeben."""
+        await self.stop_idle_watcher()
         await self.unload()
 
     # ---- Verarbeitung -------------------------------------------------------
