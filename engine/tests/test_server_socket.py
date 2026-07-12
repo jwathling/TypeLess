@@ -109,6 +109,32 @@ def test_prepare_socket_path_refuses_to_evict_a_live_instance(socket_dir: Path) 
         live.close()
 
 
+def test_prepare_socket_path_refuses_to_delete_when_liveness_is_undeterminable(
+    socket_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ein anderer ``OSError`` als ``ConnectionRefusedError`` ist kein Beweis für "verwaist".
+
+    Simuliert z. B. ``PermissionError`` beim Verbindungsversuch — die Datei liegt zwar da,
+    aber ob dahinter eine lebende Instanz steckt, lässt sich dann nicht feststellen. Im
+    Zweifel muss abgebrochen werden, nicht gelöscht.
+    """
+    socket_path = socket_dir / "typeless.sock"
+    stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    stale.bind(str(socket_path))
+    stale.close()
+    assert socket_path.is_socket()
+
+    def _raise_permission_error(self: socket.socket, address: str) -> None:
+        raise PermissionError("simulierter Rechte-Fehler beim Verbindungsversuch")
+
+    monkeypatch.setattr(socket.socket, "connect", _raise_permission_error)
+
+    with pytest.raises(RuntimeError, match="nicht feststellbar"):
+        prepare_socket_path(socket_path)
+
+    assert socket_path.is_socket(), "Ein Socket mit unbekanntem Zustand wurde gelöscht"
+
+
 def test_prepare_socket_path_creates_missing_directory(socket_dir: Path) -> None:
     socket_path = socket_dir / "neu" / "typeless.sock"
 

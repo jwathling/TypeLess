@@ -37,14 +37,27 @@ def _socket_is_alive(path: Path) -> bool:
     Ein kurzer Verbindungsversuch ist die einzige verlässliche Unterscheidung zwischen einem
     nach einem Absturz liegengebliebenen (verwaisten) Socket und dem Socket eines laufenden
     Sidecars — die Datei selbst sieht in beiden Fällen identisch aus.
+
+    Raises:
+        RuntimeError: Wenn der Verbindungsversuch mit einem anderen ``OSError`` als
+            ``ConnectionRefusedError``/``FileNotFoundError`` scheitert (z. B. ``PermissionError``
+            oder ``TimeoutError``). Das ist kein Beweis für "verwaist" — im Zweifel wird
+            abgebrochen statt gelöscht.
     """
     probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     probe.settimeout(_LIVENESS_TIMEOUT_SECONDS)
     try:
         probe.connect(str(path))
-    except OSError:
-        # ConnectionRefusedError: Die Datei liegt da, aber niemand lauscht -> verwaist.
+    except (ConnectionRefusedError, FileNotFoundError):
+        # Die Datei liegt da (oder ist gerade verschwunden), aber niemand lauscht -> verwaist.
         return False
+    except OSError as exc:
+        # Alles andere (z. B. PermissionError, TimeoutError bei vollem Listen-Backlog) ist kein
+        # Beweis für "verwaist" — eine lebende Instanz könnte dahinterstecken. Im Zweifel wird
+        # nichts gelöscht, sondern abgebrochen.
+        raise RuntimeError(
+            f"Zustand des Sockets {path} nicht feststellbar, deshalb wird nichts gelöscht."
+        ) from exc
     else:
         return True
     finally:
@@ -67,7 +80,8 @@ def prepare_socket_path(path: Path) -> None:
     den frisch angelegten Socket selbst auf ``0o666``.
 
     Raises:
-        RuntimeError: Wenn der Pfad kein Socket ist oder dort bereits ein Sidecar lauscht.
+        RuntimeError: Wenn der Pfad kein Socket ist, dort bereits ein Sidecar lauscht oder sich
+            der Zustand des Sockets nicht feststellen lässt (siehe ``_socket_is_alive``).
     """
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
@@ -87,7 +101,7 @@ def prepare_socket_path(path: Path) -> None:
         )
 
     _log.warning("Entferne verwaiste Socket-Datei: %s", path)
-    path.unlink()
+    path.unlink(missing_ok=True)
 
 
 def build_app(
@@ -146,7 +160,8 @@ def main() -> None:
     try:
         uvicorn.run(build_app(cfg), uds=str(cfg.socket_path), log_level=cfg.log_level.lower())
     finally:
-        # Weder uvicorn noch asyncio räumen den UDS-Pfad beim Herunterfahren ab. Eine
+        # uvicorn.run() räumt den UDS-Pfad bereits in seinem eigenen finally auf. Dieses
+        # unlink() ist eine bewusste Absicherung gegen künftige uvicorn-Änderungen: Eine
         # liegengebliebene Datei darf kein Beweis für einen laufenden Sidecar sein — die
         # Swift-Shell (M3) prüft die Erreichbarkeit sonst an einer Leiche.
         cfg.socket_path.unlink(missing_ok=True)
