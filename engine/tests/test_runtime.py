@@ -307,3 +307,51 @@ async def test_process_resets_the_idle_clock() -> None:
 
     assert await runtime.maybe_idle_unload() is False
     assert llm.unloads == 0
+
+
+@pytest.mark.anyio
+async def test_idle_unload_does_not_race_with_concurrent_process() -> None:
+    """TOCTOU-Regression: Der Idle-Wächter darf sich nicht hinter dem Lock anstellen und dann
+    blind entladen, nachdem ``process()`` das LLM inzwischen wieder benutzt hat.
+
+    Ablauf, den der Bug (ungeschützte Fristprüfung in ``maybe_idle_unload``, separat
+    gesperrtes ``unload()``) rot werden lässt: Die Frist ist (nach altem ``_last_used``)
+    bereits abgelaufen. ``process()`` startet zuerst und hält den Lock, während es im
+    Worker-Thread arbeitet — das ist der einzige echte Suspend-Punkt vor der
+    ``_last_used``-Aktualisierung. Erst danach wird ``maybe_idle_unload()`` gestartet: Mit
+    dem Bug liest es ``idle_for`` sofort (ohne Lock) anhand des noch veralteten
+    ``_last_used`` als „abgelaufen" und stellt sich mit seinem ``unload()``-Aufruf hinter
+    den Lock. ``process()`` beendet sich, setzt ``_last_used`` auf „jetzt" und gibt den
+    Lock frei — der wartende ``unload()`` entlädt dann bedingungslos. Mit dem Fix wird die
+    Frist erst *nach* Erhalt des Locks neu bewertet und ist dann nicht mehr abgelaufen.
+    """
+    clock = FakeClock()
+    llm = SpyRefiner()
+    runtime = make_runtime_with_clock(clock, llm)
+    await runtime.startup()
+    await runtime.preload()
+    assert runtime.health().llm_loaded is True
+
+    # Frist (gemessen am aktuellen _last_used) ist abgelaufen, bevor process() startet.
+    clock.advance(301.0)
+
+    process_task = asyncio.create_task(runtime.process(audio(), Mode.DIKTAT))
+    # process() läuft synchron bis zum Worker-Thread-Aufruf durch (kein echter Suspend-Punkt
+    # davor: das Event ist bereits gesetzt, der Lock ist frei, das LLM schon geladen) und hält
+    # dabei den Lock, während _last_used noch den alten (abgelaufenen) Stand hat.
+    await asyncio.sleep(0)
+    assert not process_task.done()
+
+    idle_task = asyncio.create_task(runtime.maybe_idle_unload())
+    # Mit dem Bug berechnet maybe_idle_unload() hier ungeschützt idle_for anhand des noch
+    # veralteten _last_used und stellt sich anschließend mit unload() hinter den Lock. Mit
+    # dem Fix versucht es direkt, den (von process() gehaltenen) Lock zu bekommen.
+    await asyncio.sleep(0)
+    assert not idle_task.done()
+
+    unloaded = await idle_task
+    await process_task
+
+    assert unloaded is False
+    assert llm.unloads == 0
+    assert runtime.health().llm_loaded is True
