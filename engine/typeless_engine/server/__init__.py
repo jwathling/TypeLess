@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .app import create_app
 from .runtime import EngineRuntime, HealthState
 
-__all__ = ["EngineRuntime", "HealthState"]
+__all__ = ["EngineRuntime", "HealthState", "create_app"]
