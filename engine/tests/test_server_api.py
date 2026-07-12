@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+from collections.abc import Callable
 
 import numpy as np
 import pytest
@@ -12,14 +14,59 @@ from tests.test_runtime import SpyRefiner, SpyTranscriber
 from typeless_engine.config import EngineConfig
 from typeless_engine.dictionary import DictionaryEngine
 from typeless_engine.interfaces import Refiner, Transcriber
-from typeless_engine.models import TARGET_SAMPLE_RATE
+from typeless_engine.models import TARGET_SAMPLE_RATE, AudioBuffer, Transcription
 from typeless_engine.server.app import create_app
 from typeless_engine.server.runtime import EngineRuntime
+
+# Obergrenze für alle Wartevorgänge in den Nebenläufigkeits-Tests. Sie wird im Erfolgsfall
+# nie ausgeschöpft (gewartet wird auf Events, nicht auf Zeit) und dient nur dazu, einen
+# Regress als Fehlschlag statt als hängenden Testlauf sichtbar zu machen.
+_TIMEOUT_SECONDS = 5.0
 
 
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
+
+
+class BlockingTranscriber(SpyTranscriber):
+    """Hält ``transcribe()`` (im Worker-Thread) an, bis der Test es freigibt."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = threading.Event()  # Verarbeitung läuft wirklich
+        self.release = threading.Event()  # Test gibt sie wieder frei
+
+    def transcribe(self, audio: AudioBuffer, *, language: str | None = None) -> Transcription:
+        self.entered.set()
+        assert self.release.wait(timeout=_TIMEOUT_SECONDS), "Freigabe blieb aus"
+        return super().transcribe(audio, language=language)
+
+
+class BlockingRefiner(SpyRefiner):
+    """Hält ``preload()`` (im Worker-Thread) an, bis der Test es freigibt."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def preload(self) -> None:
+        self.entered.set()
+        assert self.release.wait(timeout=_TIMEOUT_SECONDS), "Freigabe blieb aus"
+        super().preload()
+
+
+async def wait_for(condition: Callable[[], bool]) -> None:
+    """Pollt kurz getaktet, bis die Bedingung erfüllt ist — statt fester Wartezeiten.
+
+    Feste ``sleep``-Dauern wären auf langsamen Maschinen flaky; hier wartet der Test genau
+    so lange wie nötig und schlägt nur fehl, wenn die Bedingung gar nicht eintritt.
+    """
+    deadline = asyncio.get_running_loop().time() + _TIMEOUT_SECONDS
+    while not condition():
+        assert asyncio.get_running_loop().time() < deadline, "Bedingung trat nicht ein"
+        await asyncio.sleep(0.005)
 
 
 def build(transcriber: Transcriber | None = None, refiner: Refiner | None = None) -> EngineRuntime:
@@ -79,6 +126,76 @@ async def test_process_returns_final_text() -> None:
     assert body["refined"] is True
     assert body["fallback_reason"] is None
     assert "transcribe" in body["timings_ms"]
+
+
+@pytest.mark.anyio
+async def test_language_query_reaches_the_transcriber() -> None:
+    """``?language=en`` darf nicht stillschweigend verpuffen — es muss bis zum STT durchschlagen."""
+    stt = SpyTranscriber()
+    runtime = build(transcriber=stt)
+    await runtime.startup()
+    async with await client_for(runtime) as client:
+        response = await client.post("/process?mode=diktat&language=en", content=pcm())
+
+    assert response.status_code == 200
+    assert stt.last_language == "en"
+
+
+@pytest.mark.anyio
+async def test_health_answers_while_process_is_running() -> None:
+    """Kernzusicherung: ``/health`` antwortet auch mitten in einer Verarbeitung sofort.
+
+    Die Verarbeitung läuft im Worker-Thread; der Event-Loop bleibt dadurch frei. Der Test
+    hält ``transcribe()`` fest, während er ``/health`` abfragt — bliebe der Loop blockiert,
+    käme die Antwort erst nach der Freigabe (und ``busy`` wäre dann längst wieder False).
+    """
+    stt = BlockingTranscriber()
+    runtime = build(transcriber=stt)
+    await runtime.startup()
+
+    async with await client_for(runtime) as client:
+        task = asyncio.create_task(client.post("/process?mode=diktat", content=pcm()))
+        try:
+            await wait_for(stt.entered.is_set)  # Verarbeitung läuft jetzt wirklich
+
+            health = await asyncio.wait_for(client.get("/health"), timeout=_TIMEOUT_SECONDS)
+            assert health.status_code == 200
+            assert health.json()["busy"] is True
+            assert health.json()["status"] == "ready"
+        finally:
+            stt.release.set()
+
+        response = await asyncio.wait_for(task, timeout=_TIMEOUT_SECONDS)
+
+    assert response.status_code == 200
+    assert runtime.health().busy is False
+
+
+@pytest.mark.anyio
+async def test_preload_responds_before_loading_finished() -> None:
+    """``/preload`` ist fire-and-forget: 202, *während* das Laden noch läuft.
+
+    Mit einem instantan ladenden Refiner wäre auch ein synchrones ``await runtime.preload()``
+    grün. Hier hängt das Laden im Worker-Thread fest, bis der Test es freigibt — ein
+    synchroner Endpunkt käme deshalb gar nicht erst zur Antwort.
+    """
+    llm = BlockingRefiner()
+    runtime = build(refiner=llm)
+    await runtime.startup()
+
+    async with await client_for(runtime) as client:
+        try:
+            response = await asyncio.wait_for(client.post("/preload"), timeout=_TIMEOUT_SECONDS)
+            assert response.status_code == 202
+
+            await wait_for(llm.entered.is_set)  # Laden hat begonnen ...
+            assert runtime.health().llm_loaded is False  # ... ist aber noch nicht durch
+        finally:
+            llm.release.set()
+
+        await wait_for(lambda: runtime.health().llm_loaded)
+
+    assert llm.preloads == 1
 
 
 @pytest.mark.anyio
