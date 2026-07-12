@@ -15,6 +15,7 @@ from typing import Annotated
 import numpy as np
 from fastapi import Body, FastAPI, HTTPException, Query, Response
 from pydantic import BaseModel
+from starlette.types import Lifespan
 
 from ..logging_ import get_logger
 from ..models import TARGET_SAMPLE_RATE, AudioBuffer, Mode
@@ -47,9 +48,18 @@ class ProcessResponse(BaseModel):
     timings_ms: dict[str, float]
 
 
-def create_app(runtime: EngineRuntime) -> FastAPI:
-    """Baut die FastAPI-App über einer bereits konstruierten Runtime."""
-    app = FastAPI(title="TypeLess Sidecar", docs_url=None, redoc_url=None)
+def create_app(
+    runtime: EngineRuntime,
+    *,
+    lifespan: Lifespan[FastAPI] | None = None,
+) -> FastAPI:
+    """Baut die FastAPI-App über einer bereits konstruierten Runtime.
+
+    ``lifespan`` wird an FastAPI durchgereicht (dokumentierte API) — früher setzte
+    ``build_app`` stattdessen ``app.router.lifespan_context``, ein Starlette-Internal, das
+    bei einem Upgrade still hätte brechen können.
+    """
+    app = FastAPI(title="TypeLess Sidecar", docs_url=None, redoc_url=None, lifespan=lifespan)
 
     # Referenzen auf laufende Preload-Tasks. Ohne sie hält nichts den Task am Leben: Der
     # Event-Loop führt nur schwache Referenzen, der Garbage Collector darf einen Task also
