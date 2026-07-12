@@ -220,3 +220,90 @@ async def test_stt_failure_propagates() -> None:
 
     with pytest.raises(RuntimeError, match="STT kaputt"):
         await runtime.process(audio(), Mode.DIKTAT)
+
+
+class FakeClock:
+    """Manipulierbare Uhr — damit der Idle-Test nicht fünf Minuten dauert."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def make_runtime_with_clock(clock: FakeClock, refiner: Refiner) -> EngineRuntime:
+    return EngineRuntime(
+        EngineConfig(stt_backend="mock", llm_backend="mock", idle_unload_seconds=300.0),
+        transcriber=SpyTranscriber(),
+        refiner=refiner,
+        dictionary=DictionaryEngine({}),
+        clock=clock,
+    )
+
+
+@pytest.mark.anyio
+async def test_idle_unload_frees_llm_after_timeout() -> None:
+    clock = FakeClock()
+    llm = SpyRefiner()
+    runtime = make_runtime_with_clock(clock, llm)
+    await runtime.startup()
+    await runtime.preload()
+    assert runtime.health().llm_loaded is True
+
+    clock.advance(301.0)
+    unloaded = await runtime.maybe_idle_unload()
+
+    assert unloaded is True
+    assert llm.unloads == 1
+    assert runtime.health().llm_loaded is False
+
+
+@pytest.mark.anyio
+async def test_idle_unload_keeps_llm_before_timeout() -> None:
+    clock = FakeClock()
+    llm = SpyRefiner()
+    runtime = make_runtime_with_clock(clock, llm)
+    await runtime.startup()
+    await runtime.preload()
+
+    clock.advance(299.0)
+    unloaded = await runtime.maybe_idle_unload()
+
+    assert unloaded is False
+    assert llm.unloads == 0
+    assert runtime.health().llm_loaded is True
+
+
+@pytest.mark.anyio
+async def test_idle_unload_keeps_stt_warm() -> None:
+    """Das STT ist latenzkritisch und bleibt geladen — nur das LLM fliegt raus."""
+    clock = FakeClock()
+    runtime = make_runtime_with_clock(clock, SpyRefiner())
+    await runtime.startup()
+    await runtime.preload()
+
+    clock.advance(301.0)
+    await runtime.maybe_idle_unload()
+
+    assert runtime.health().stt_loaded is True
+    assert runtime.health().status == "ready"
+
+
+@pytest.mark.anyio
+async def test_process_resets_the_idle_clock() -> None:
+    clock = FakeClock()
+    llm = SpyRefiner()
+    runtime = make_runtime_with_clock(clock, llm)
+    await runtime.startup()
+    await runtime.preload()
+
+    clock.advance(299.0)
+    await runtime.process(audio(), Mode.DIKTAT)
+    clock.advance(299.0)  # seit der Nutzung erst 299 s -> noch nicht entladen
+
+    assert await runtime.maybe_idle_unload() is False
+    assert llm.unloads == 0
