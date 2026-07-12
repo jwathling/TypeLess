@@ -51,6 +51,8 @@ uv sync --extra dev --extra mlx      # zusätzlich MLX — NUR Apple Silicon
 uv run pytest -q                     # Tests (Mock-Backends, kein Modell nötig)
 bash ../scripts/check.sh             # black + ruff + mypy(strict) + pytest
 
+uv run python -m typeless_engine.server   # Sidecar starten (UDS, siehe engine/README.md)
+
 # Mock-Pfad (ohne Modelle):
 uv run typeless dict "wir nutzen hot spot"
 uv run typeless refine "text" --mode diktat --llm mock --show-stages
@@ -72,9 +74,21 @@ Persönliches Wörterbuch (deterministisch, vor dem LLM): JSON unter
   BrainDump), Pipeline + Sanity-Check (Länge **und** Divergenz), MLX-Backends (lazy) +
   Mocks, CLI. 41 Tests grün, ruff/mypy(strict)/black sauber.
 - [x] **M1 auf echten Modellen verifiziert** (Apple Silicon, s. „Messwerte" unten).
-- [ ] **M2** — Sidecar-Server: FastAPI/uvicorn über **Unix-Domain-Socket**, Endpunkte
-  `/health`, `/preload` (LLM vorladen), `/process` (PCM+Modus → Text), `/unload`.
-  STT warm beim Start, LLM on-demand. Logging.
+- [x] **M2** — Sidecar-Server: FastAPI/uvicorn über **Unix-Domain-Socket** (kein TCP-Port).
+  `engine/typeless_engine/server/`: `runtime.py` (Modelle, Lock, Idle-Unload — kennt kein
+  HTTP), `app.py` (dünne HTTP-Schicht, zustandslos), `__main__.py` (Start, Socket-Hygiene).
+  86 Tests grün, gegen echte Modelle über den Socket verifiziert.
+  - `GET /health` → `starting|ready`, antwortet **immer sofort** (auch während der
+    Verarbeitung; Modellaufrufe laufen im Worker-Thread).
+  - `POST /preload` → `202` nach ~1 ms, lädt das LLM im Hintergrund (Hotkey-**Druck**).
+  - `POST /process?mode=…[&language=…][&sample_rate=16000]` → rohes Float32-PCM als Body
+    (16 kHz mono), liefert `ProcessResult` als JSON (Hotkey-**Loslassen**).
+  - `POST /unload` → LLM sofort freigeben (macOS-Speicherdruck).
+  - **Fehlerverhalten:** LLM-Ausfall → `200` mit `refined: false` + Rohtext (Diktat geht nie
+    verloren). STT-Ausfall → `500`. Ungültige Eingabe → `400`, bevor ein Modell lädt.
+  - Verarbeitung ist **serialisiert** (Lock); ein Unload fällt nie in eine laufende
+    Generierung. Socket-Datei wird beim Start/Ende aufgeräumt; ein **lebender** Sidecar wird
+    per `connect()`-Probe erkannt und nicht überschrieben.
 - [ ] **M3** Swift-Shell · **M4** Audio+Hotkey+Overlay · **M5** Einfügen · **M6** Modi-
   Umschalter · **M7** Settings-UI · **M8** Polish/Packaging.
 
