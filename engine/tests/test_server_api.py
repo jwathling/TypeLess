@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from tests.test_runtime import SpyRefiner, SpyTranscriber
+from tests.test_runtime import FailingWarmUpTranscriber, SpyRefiner, SpyTranscriber
 from typeless_engine.config import EngineConfig
 from typeless_engine.dictionary import DictionaryEngine
 from typeless_engine.interfaces import Refiner, Transcriber
@@ -55,6 +55,18 @@ class BlockingRefiner(SpyRefiner):
         self.entered.set()
         assert self.release.wait(timeout=_TIMEOUT_SECONDS), "Freigabe blieb aus"
         super().preload()
+
+
+class CaptureTranscriber(SpyTranscriber):
+    """Hält fest, welcher ``AudioBuffer`` tatsächlich unten ankommt."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.captured: AudioBuffer | None = None
+
+    def transcribe(self, audio: AudioBuffer, *, language: str | None = None) -> Transcription:
+        self.captured = audio
+        return super().transcribe(audio, language=language)
 
 
 async def wait_for(condition: Callable[[], bool]) -> None:
@@ -297,3 +309,82 @@ async def test_stt_failure_returns_500() -> None:
         response = await client.post("/process?mode=diktat", content=pcm())
 
     assert response.status_code == 500
+
+
+@pytest.mark.anyio
+async def test_failed_warm_up_reports_failed_and_process_returns_503() -> None:
+    """Ein Startfehler ist ein Zustand, kein Verarbeitungsfehler — deshalb 503, nicht 500.
+
+    Und ``/process`` muss *antworten*: Vor dem Fix wäre die Anfrage endlos offen geblieben,
+    weil ``process()`` auf ein Ready-Event wartete, das nie gesetzt wird.
+    """
+    runtime = build(transcriber=FailingWarmUpTranscriber())
+    with pytest.raises(RuntimeError, match="Modell kaputt"):
+        await runtime.startup()
+
+    async with await client_for(runtime) as client:
+        health = (await client.get("/health")).json()
+        assert health["status"] == "failed"
+        assert health["stt_loaded"] is False
+        assert health["error"] is not None and "Modell kaputt" in health["error"]
+
+        response = await asyncio.wait_for(
+            client.post("/process?mode=diktat", content=pcm()), timeout=_TIMEOUT_SECONDS
+        )
+
+    assert response.status_code == 503
+    assert "Modell kaputt" in response.json()["detail"]
+
+
+@pytest.mark.anyio
+async def test_preload_is_not_reported_as_busy() -> None:
+    """``busy`` darf nur ein laufendes Diktat meinen — nicht jeden gehaltenen Lock.
+
+    Hinge die Swift-Shell (M3) ihr Overlay an ``busy``, blitzte es sonst schon beim bloßen
+    Hotkey-Druck auf (der ``/preload`` auslöst, ohne dass irgendetwas verarbeitet wird).
+    Die Gegenprobe — laufende Verarbeitung *meldet* ``busy`` — steckt in
+    ``test_health_answers_while_process_is_running``.
+    """
+    llm = BlockingRefiner()
+    runtime = build(refiner=llm)
+    await runtime.startup()
+
+    async with await client_for(runtime) as client:
+        try:
+            assert (await client.post("/preload")).status_code == 202
+            await wait_for(llm.entered.is_set)  # Laden läuft und hält den Lock ...
+
+            body = (await asyncio.wait_for(client.get("/health"), _TIMEOUT_SECONDS)).json()
+            assert body["busy"] is False  # ... aber verarbeitet wird nichts
+            assert body["llm_loaded"] is False  # (und geladen ist es auch noch nicht)
+        finally:
+            llm.release.set()
+
+        await wait_for(lambda: runtime.health().llm_loaded)
+
+
+@pytest.mark.anyio
+async def test_pcm_body_reaches_the_transcriber_unverfaelscht() -> None:
+    """Was Swift schickt, muss beim Transcriber Sample für Sample wieder ankommen.
+
+    Ohne diesen Test bliebe eine Regression in ``_decode_pcm`` (falsche Byte-Reihenfolge,
+    falscher dtype, abgeschnittener Puffer) bei allen anderen Tests grün: Sie schicken
+    Nullen — und die sehen in jeder Byte-Reihenfolge gleich aus.
+    """
+    stt = CaptureTranscriber()
+    runtime = build(transcriber=stt)
+    await runtime.startup()
+
+    # Markante Werte: asymmetrisch, mit Vorzeichen, exakt in float32 darstellbar.
+    sent = np.array([0.5, -0.25, 1.0, -1.0, 0.125], dtype="<f4")
+
+    async with await client_for(runtime) as client:
+        response = await client.post("/process?mode=diktat", content=sent.tobytes())
+
+    assert response.status_code == 200
+    assert stt.captured is not None
+    buffer = stt.captured
+    assert buffer.samples.dtype == np.float32
+    assert buffer.sample_rate == TARGET_SAMPLE_RATE
+    assert len(buffer.samples) == len(sent)  # nichts abgeschnitten, nichts angehängt
+    np.testing.assert_array_equal(buffer.samples, sent.astype(np.float32))

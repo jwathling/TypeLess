@@ -20,7 +20,7 @@ from fastapi import FastAPI
 
 from ..config import EngineConfig
 from ..logging_ import configure_logging, get_logger
-from .app import create_app
+from .app import cancel_preload_tasks, create_app
 from .runtime import EngineRuntime
 
 _log = get_logger(__name__)
@@ -75,15 +75,19 @@ def prepare_socket_path(path: Path) -> None:
     beliebige Datei entfernt. Und lauscht dort bereits eine Instanz, wäre ein Entfernen fatal:
     Die erste liefe weiter (und hielte ~1,5 GB STT-RAM), wäre für Clients aber unerreichbar.
 
-    Das Elternverzeichnis wird mit ``0o700`` angelegt: Die Zugangskontrolle des Sockets ist
-    das einzige Sicherheitsmerkmal des Sidecars (kein Auth, keine Tokens), und uvicorn setzt
-    den frisch angelegten Socket selbst auf ``0o666``.
+    Das Elternverzeichnis bekommt ``0o700``: Die Zugangskontrolle des Sockets ist das einzige
+    Sicherheitsmerkmal des Sidecars (kein Auth, keine Tokens), und uvicorn setzt den frisch
+    angelegten Socket selbst auf ``0o666``. Das ``chmod`` ist nicht redundant zum ``mode`` des
+    ``mkdir``: Der wirkt nur beim Anlegen. ``~/Library/Application Support/TypeLess`` existiert
+    aber in aller Regel schon aus M1 (dort liegt das Wörterbuch) — mit den lockereren Rechten,
+    die das damalige ``mkdir`` vergeben hat.
 
     Raises:
         RuntimeError: Wenn der Pfad kein Socket ist, dort bereits ein Sidecar lauscht oder sich
             der Zustand des Sockets nicht feststellen lässt (siehe ``_socket_is_alive``).
     """
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
 
     if not path.exists() and not path.is_symlink():
         return
@@ -119,20 +123,21 @@ def build_app(
     async def warm_up_visibly() -> None:
         """Warm-up mit sichtbarem Fehler.
 
-        Ohne dieses ``except`` bliebe eine Exception im Hintergrund-Task unabgeholt: ``/health``
-        meldete für immer ``starting``, und der einzige Hinweis wäre ein "Task exception was
-        never retrieved" beim Garbage-Collect. Ein Sidecar, dessen STT nicht lädt, muss das im
-        Log sagen.
+        ``EngineRuntime.startup()`` merkt sich einen Startfehler selbst (``/health`` meldet dann
+        ``failed`` samt Grund, und ``/process`` scheitert sofort mit 503, statt endlos zu warten)
+        und reicht ihn weiter. Hier wird er nur noch protokolliert: Ohne dieses ``except`` bliebe
+        die Exception im Hintergrund-Task unabgeholt, und der einzige Hinweis wäre ein "Task
+        exception was never retrieved" beim Garbage-Collect.
         """
         try:
             await engine.startup()
         except asyncio.CancelledError:
-            raise  # Regulärer Shutdown während des Warm-ups — kein Fehler.
+            raise  # Regulärer Shutdown während des Warm-ups — kein Startfehler.
         except Exception:  # noqa: BLE001 - jeder Backend-Fehler ist hier gleichwertig
-            _log.exception("STT-Warm-up fehlgeschlagen — /health bleibt auf 'starting'.")
+            _log.exception("STT-Warm-up fehlgeschlagen — /health meldet 'failed'.")
 
     @asynccontextmanager
-    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Das Warm-up läuft als Hintergrund-Task: Der Server muss sofort antworten können,
         # damit /health die ~14 s Ladezeit als "starting" melden kann.
         warm_up = asyncio.create_task(warm_up_visibly())
@@ -145,6 +150,9 @@ def build_app(
             # EngineRuntime.stop_idle_watcher().
             with contextlib.suppress(asyncio.CancelledError):
                 await warm_up
+            # Vor dem Shutdown: Ein noch laufender /preload-Task könnte sonst das Rennen um den
+            # Lock gegen shutdown() gewinnen und das LLM in den sterbenden Prozess laden.
+            await cancel_preload_tasks(app)
             await engine.shutdown()
 
     return create_app(engine, lifespan=lifespan)

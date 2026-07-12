@@ -10,6 +10,7 @@ Netzwerkschnittstelle. Der Host-Teil der URL ist bedeutungslos.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import Annotated
 
 import numpy as np
@@ -19,7 +20,7 @@ from starlette.types import Lifespan
 
 from ..logging_ import get_logger
 from ..models import TARGET_SAMPLE_RATE, AudioBuffer, Mode
-from .runtime import EngineRuntime
+from .runtime import EngineRuntime, StartupFailedError
 
 _log = get_logger(__name__)
 
@@ -29,12 +30,13 @@ _BYTES_PER_SAMPLE = 4
 
 
 class HealthResponse(BaseModel):
-    status: str
+    status: str  # "starting" | "ready" | "failed"
     stt_loaded: bool
     llm_loaded: bool
     busy: bool
     stt_model: str
     llm_model: str
+    error: str | None = None  # Grund, falls ``status == "failed"``
 
 
 class ProcessResponse(BaseModel):
@@ -64,7 +66,11 @@ def create_app(
     # Referenzen auf laufende Preload-Tasks. Ohne sie hält nichts den Task am Leben: Der
     # Event-Loop führt nur schwache Referenzen, der Garbage Collector darf einen Task also
     # mitten in der Ausführung einsammeln (so dokumentiert bei ``asyncio.create_task``).
+    # Über ``app.state`` erreichbar, damit der Lifespan sie beim Herunterfahren abräumen kann
+    # (siehe ``cancel_preload_tasks``) — sonst lüde ein gerade angelaufener ``/preload`` das
+    # LLM noch in den sterbenden Prozess.
     preload_tasks: set[asyncio.Task[None]] = set()
+    app.state.preload_tasks = preload_tasks
 
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
@@ -77,6 +83,7 @@ def create_app(
             busy=state.busy,
             stt_model=state.stt_model,
             llm_model=state.llm_model,
+            error=state.error,
         )
 
     @app.post("/preload", status_code=202)
@@ -118,6 +125,13 @@ def create_app(
 
         try:
             result = await runtime.process(buffer, parsed_mode, language=language)
+        except StartupFailedError as exc:
+            # Ein Startfehler ist ein Zustand, kein Verarbeitungsfehler: Der Dienst ist gar nicht
+            # erst einsatzbereit geworden. 503 sagt genau das — und sagt dem Client zugleich, dass
+            # ein Wiederholen sinnlos ist, solange /health "failed" meldet.
+            raise HTTPException(
+                status_code=503, detail=f"Sidecar nicht einsatzbereit: {exc}"
+            ) from exc
         except Exception as exc:  # noqa: BLE001 - ohne Transkription gibt es nichts zu retten
             _log.exception("Verarbeitung fehlgeschlagen")
             raise HTTPException(
@@ -136,6 +150,21 @@ def create_app(
         )
 
     return app
+
+
+async def cancel_preload_tasks(app: FastAPI) -> None:
+    """Bricht laufende ``/preload``-Tasks ab und wartet sie aus (Aufruf im Lifespan-``finally``).
+
+    Ohne das gewänne beim Herunterfahren womöglich ``shutdown()`` das Rennen um den Lock,
+    während ein gerade angelaufener ``/preload``-Task noch dahinter wartet — er lüde das LLM
+    dann in den sterbenden Prozess ("Task was destroyed but it is pending!").
+    """
+    tasks: set[asyncio.Task[None]] = getattr(app.state, "preload_tasks", set())
+    for task in list(tasks):
+        task.cancel()
+    for task in list(tasks):
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 def _decode_pcm(payload: bytes, sample_rate: int) -> AudioBuffer:

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections.abc import Callable
 
 import numpy as np
 import pytest
@@ -15,7 +16,12 @@ from typeless_engine.config import EngineConfig
 from typeless_engine.dictionary import DictionaryEngine
 from typeless_engine.interfaces import Refiner, Transcriber
 from typeless_engine.models import TARGET_SAMPLE_RATE, AudioBuffer, Mode, Transcription
-from typeless_engine.server.runtime import EngineRuntime
+from typeless_engine.server.runtime import EngineRuntime, StartupFailedError
+
+# Reißleine für alle Wartevorgänge: Im Erfolgsfall wird sie nie ausgeschöpft (gewartet wird auf
+# Events, nicht auf Zeit). Sie sorgt nur dafür, dass eine Regression den Testlauf rot macht,
+# statt ihn einfrieren zu lassen.
+_TIMEOUT_SECONDS = 5.0
 
 
 class SpyTranscriber(Transcriber):
@@ -84,9 +90,52 @@ class SpyRefiner(Refiner):
                 self.in_flight -= 1
 
 
+class FailingWarmUpTranscriber(SpyTranscriber):
+    """Steht für den Ernstfall: kaputter Modell-Cache, falsche Modell-ID, kein Netz."""
+
+    def warm_up(self) -> None:
+        raise RuntimeError("Modell kaputt")
+
+
+class HoldingTranscriber(SpyTranscriber):
+    """Hält ``transcribe()`` (im Worker-Thread) an, bis der Test es freigibt."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = threading.Event()  # Verarbeitung läuft wirklich
+        self.release = threading.Event()  # Test gibt sie wieder frei
+
+    def transcribe(self, audio: AudioBuffer, *, language: str | None = None) -> Transcription:
+        self.entered.set()
+        assert self.release.wait(timeout=_TIMEOUT_SECONDS), "Freigabe blieb aus"
+        return super().transcribe(audio, language=language)
+
+
+class HoldingRefiner(SpyRefiner):
+    """Hält ``preload()`` (im Worker-Thread) an, bis der Test es freigibt."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def preload(self) -> None:
+        self.entered.set()
+        assert self.release.wait(timeout=_TIMEOUT_SECONDS), "Freigabe blieb aus"
+        super().preload()
+
+
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
+
+
+async def wait_for(condition: Callable[[], bool]) -> None:
+    """Pollt bis zur Bedingung — statt einer festen Wartezeit (die entweder bremst oder flakt)."""
+    deadline = asyncio.get_running_loop().time() + _TIMEOUT_SECONDS
+    while not condition():
+        assert asyncio.get_running_loop().time() < deadline, "Bedingung trat nicht ein"
+        await asyncio.sleep(0.005)
 
 
 def make_runtime(
@@ -117,6 +166,29 @@ async def test_startup_warms_stt() -> None:
     assert stt.warm_ups == 1
     assert runtime.health().status == "ready"
     assert runtime.health().stt_loaded is True
+
+
+@pytest.mark.anyio
+async def test_failed_warm_up_reports_failed_and_process_fails_fast() -> None:
+    """Ein gescheitertes Warm-up darf den Sidecar nicht in einen Zombie verwandeln.
+
+    Vor dem Fix wurde das Ready-Event nie gesetzt: ``/health`` meldete für immer ``starting``
+    und **jede** ``process()``-Anfrage hing endlos in ``await self._ready.wait()``. Die
+    Swift-Shell (M3) könnte "lädt noch" nicht von "tot" unterscheiden. Das ``asyncio.wait_for``
+    unten macht genau diesen Hänger zu einem roten Test statt zu einem eingefrorenen Lauf.
+    """
+    runtime = make_runtime(transcriber=FailingWarmUpTranscriber())
+
+    with pytest.raises(RuntimeError, match="Modell kaputt"):
+        await runtime.startup()
+
+    state = runtime.health()
+    assert state.status == "failed"
+    assert state.stt_loaded is False
+    assert state.error is not None and "Modell kaputt" in state.error
+
+    with pytest.raises(StartupFailedError):
+        await asyncio.wait_for(runtime.process(audio(), Mode.DIKTAT), timeout=_TIMEOUT_SECONDS)
 
 
 @pytest.mark.anyio
@@ -323,6 +395,151 @@ async def test_process_resets_the_idle_clock() -> None:
 
     assert await runtime.maybe_idle_unload() is False
     assert llm.unloads == 0
+
+
+@pytest.mark.anyio
+async def test_preload_refreshes_the_idle_clock_even_when_llm_is_already_loaded() -> None:
+    """Ein ``/preload`` beim Hotkey-Druck ist eine Nutzung — auch wenn nichts zu laden ist.
+
+    Regression: ``_preload_unlocked()`` kehrte bei geladenem LLM zurück, *bevor* ``_last_used``
+    gesetzt wurde. Ein Hotkey-Druck kurz vor Fristende frischte die Uhr also nicht auf, und der
+    Idle-Wächter entlud das Modell mitten im Diktat — genau der Fall, für den ``/preload``
+    existiert. Der folgende ``/process`` zahlte dann die vollen ~4 s Ladezeit.
+    """
+    clock = FakeClock()
+    llm = SpyRefiner()
+    runtime = make_runtime_with_clock(clock, llm)  # idle_unload_seconds=300
+    await runtime.startup()
+    await runtime.preload()  # t=0: LLM geladen, _last_used = 0
+
+    clock.advance(290.0)  # Hotkey kurz vor Fristende ...
+    await runtime.preload()  # ... no-op fürs Laden, aber sehr wohl eine Nutzung
+    assert llm.preloads == 1  # nichts nachgeladen
+
+    clock.advance(299.0)  # 589 s nach dem ersten Laden, aber erst 299 s nach der Nutzung
+
+    assert await runtime.maybe_idle_unload() is False
+    assert llm.unloads == 0
+    assert runtime.health().llm_loaded is True
+
+
+@pytest.mark.anyio
+async def test_preload_is_not_reported_as_busy() -> None:
+    """``busy`` heißt "es wird ein Diktat verarbeitet" — nicht "der Lock ist gerade genommen".
+
+    Regression: ``busy`` war ``self._lock.locked()``. Damit meldete auch ein reines ``/preload``
+    ``busy: true``, obwohl gar nichts verarbeitet wird — das Overlay der Swift-Shell (M3) würde
+    beim bloßen Hotkey-Druck aufblitzen.
+    """
+    llm = HoldingRefiner()
+    runtime = make_runtime(refiner=llm)
+    await runtime.startup()
+
+    preload_task = asyncio.create_task(runtime.preload())
+    try:
+        await wait_for(llm.entered.is_set)  # Laden hält jetzt wirklich den Lock ...
+        assert runtime.health().busy is False  # ... busy ist trotzdem False
+    finally:
+        llm.release.set()
+        await asyncio.wait_for(preload_task, timeout=_TIMEOUT_SECONDS)
+
+
+@pytest.mark.anyio
+async def test_process_is_reported_as_busy() -> None:
+    """Die Gegenprobe zu ``test_preload_is_not_reported_as_busy``."""
+    stt = HoldingTranscriber()
+    runtime = make_runtime(transcriber=stt)
+    await runtime.startup()
+
+    process_task = asyncio.create_task(runtime.process(audio(), Mode.DIKTAT))
+    try:
+        await wait_for(stt.entered.is_set)
+        assert runtime.health().busy is True
+    finally:
+        stt.release.set()
+        await asyncio.wait_for(process_task, timeout=_TIMEOUT_SECONDS)
+
+    assert runtime.health().busy is False
+
+
+@pytest.mark.anyio
+async def test_unload_waits_for_a_running_process() -> None:
+    """Die Kernzusage, die verhindert, dass MLX ein Modell mitten in der Generierung freigibt.
+
+    Der TOCTOU-Test unten deckt nur ``maybe_idle_unload()`` ab, das einen anderen Zweig nimmt
+    (Fristprüfung *im* Lock). Hier geht es um das direkte ``unload()`` — den Pfad, den
+    ``/unload`` bei macOS-Speicherdruck nimmt: Es muss sich hinter dem Lock anstellen, statt
+    dem laufenden ``process()`` das Modell unter den Händen wegzuziehen.
+    """
+    stt = HoldingTranscriber()
+    llm = SpyRefiner()
+    runtime = make_runtime(transcriber=stt, refiner=llm)
+    await runtime.startup()
+    await runtime.preload()
+
+    process_task = asyncio.create_task(runtime.process(audio(), Mode.DIKTAT))
+    unload_task: asyncio.Task[None] | None = None
+    try:
+        await wait_for(stt.entered.is_set)  # Verarbeitung läuft wirklich und hält den Lock
+
+        unload_task = asyncio.create_task(runtime.unload())
+        await asyncio.sleep(0)  # dem Task Gelegenheit geben, am Lock zu blockieren
+
+        assert not unload_task.done(), "unload() hat nicht auf die laufende Verarbeitung gewartet"
+        assert llm.unloads == 0
+        assert runtime.health().llm_loaded is True
+    finally:
+        # Immer freigeben — auch wenn eine Assertion vorher scheitert; sonst hinge der
+        # Worker-Thread (und mit ihm der Testlauf).
+        stt.release.set()
+        await asyncio.wait_for(process_task, timeout=_TIMEOUT_SECONDS)
+        if unload_task is not None:
+            await asyncio.wait_for(unload_task, timeout=_TIMEOUT_SECONDS)
+
+    assert llm.unloads == 1  # erst *nach* dem Ende der Verarbeitung
+    assert runtime.health().llm_loaded is False
+
+
+@pytest.mark.anyio
+async def test_idle_watcher_unloads_in_the_background_and_stops_cleanly() -> None:
+    """Der Wächter-Task selbst: startet, entlädt tatsächlich, lässt sich sauber stoppen.
+
+    Die Frist läuft über die ``FakeClock`` ab (keine echte Wartezeit); real ist nur das kurze
+    Prüfintervall, auf das der Test pollt, statt eine feste Zeit zu schlafen.
+    """
+    clock = FakeClock()
+    llm = SpyRefiner()
+    runtime = EngineRuntime(
+        EngineConfig(
+            stt_backend="mock",
+            llm_backend="mock",
+            idle_unload_seconds=60.0,
+            idle_check_interval_seconds=0.01,
+        ),
+        transcriber=SpyTranscriber(),
+        refiner=llm,
+        dictionary=DictionaryEngine({}),
+        clock=clock,
+    )
+    await runtime.startup()
+    await runtime.preload()
+    assert runtime.health().llm_loaded is True
+
+    runtime.start_idle_watcher()
+    try:
+        clock.advance(61.0)  # Frist abgelaufen — der nächste Durchlauf muss entladen.
+        # Auf den Zustand der Runtime warten, nicht auf ``llm.unloads``: Der Zähler wird im
+        # Worker-Thread hochgezählt und ist damit schon sichtbar, bevor die Coroutine wieder
+        # dran ist und ``_llm_loaded`` zurücksetzt.
+        await wait_for(lambda: not runtime.health().llm_loaded)
+        assert llm.unloads == 1
+        assert runtime.health().stt_loaded is True  # STT bleibt warm
+    finally:
+        await runtime.stop_idle_watcher()
+
+    # Sauber gestoppt: Der Wächter läuft nicht weiter (und ein zweiter Stopp ist harmlos).
+    await runtime.stop_idle_watcher()
+    assert llm.unloads == 1
 
 
 @pytest.mark.anyio
