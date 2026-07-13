@@ -19,7 +19,13 @@ public enum AudioResamplerError: Error, Equatable {
 /// Häppchengrenze zerstören (gemessen: lokales SNR bricht von 52 dB auf 25 dB ein — siehe
 /// `AudioResamplerTests`). Erst `finish()` am echten Ende der Aufnahme flusht einmalig.
 ///
-/// Nicht `Sendable`: Wird ausschließlich aus dem Audio-Callback benutzt, der seriell ist.
+/// Nicht `Sendable`: `append` läuft ausschließlich im seriellen Audio-Callback. `finish()`
+/// wird genau einmal von einem anderen Kontext gerufen (dem Actor, in
+/// `AVAudioEngineRecorder.stop()`) — sicher ist das nur, weil der Aufrufer zu diesem Zeitpunkt
+/// bereits den Tap entfernt **und** die Engine gestoppt hat, bevor er `finish()` ruft (s.
+/// Kommentar dort). Vor oder parallel zu dieser Reihenfolge darf `finish()` nicht aufgerufen
+/// werden — sonst griffen Audio-Thread und Aufrufer gleichzeitig auf denselben
+/// `AVAudioConverter` zu.
 public final class AudioResampler {
     public static let targetSampleRate: Double = 16_000
 
