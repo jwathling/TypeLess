@@ -192,6 +192,24 @@ async def test_failed_warm_up_reports_failed_and_process_fails_fast() -> None:
 
 
 @pytest.mark.anyio
+async def test_failed_warm_up_skips_preload() -> None:
+    """Ohne funktionierendes STT wird nie transkribiert — dann lohnt auch kein LLM im RAM.
+
+    Sonst zöge jeder Hotkey-Druck ~2 GB in einen Prozess, der ohnehin nichts liefern kann.
+    """
+    llm = SpyRefiner()
+    runtime = make_runtime(transcriber=FailingWarmUpTranscriber(), refiner=llm)
+
+    with pytest.raises(RuntimeError, match="Modell kaputt"):
+        await runtime.startup()
+
+    await runtime.preload()
+
+    assert llm.preloads == 0
+    assert runtime.health().llm_loaded is False
+
+
+@pytest.mark.anyio
 async def test_preload_is_idempotent() -> None:
     llm = SpyRefiner()
     runtime = make_runtime(refiner=llm)
