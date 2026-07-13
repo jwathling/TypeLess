@@ -34,6 +34,11 @@ public struct ProcessResult: Sendable, Equatable {
 public enum SidecarError: Error, Equatable, Sendable {
     /// Am Socket lauscht niemand — der Sidecar läuft nicht.
     case unreachable
+    /// Die Verbindung stand, der Sidecar hat aber nicht (rechtzeitig) geantwortet. Ausdrücklich
+    /// etwas **anderes** als ``unreachable``: Der Prozess läuft, verarbeitet laut M2 aber
+    /// serialisiert — eine noch laufende vorherige Anfrage lässt die nächste warten. Die App muss
+    /// darauf anders reagieren als auf ``unreachable`` (abwarten statt Neustart anbieten).
+    case timedOut
     /// Der Sidecar läuft, ist aber nicht einsatzbereit (STT-Warm-up gescheitert). HTTP 503.
     /// Ausdrücklich etwas **anderes** als ``unreachable``.
     case notReady(String)

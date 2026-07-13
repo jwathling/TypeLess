@@ -11,18 +11,32 @@ public protocol SidecarClient: Sendable {
 /// Die echte Implementierung: HTTP über den Unix-Domain-Socket.
 public struct HTTPSidecarClient: SidecarClient {
     private let transport: HTTPUnixTransport
+    private let healthTimeout: Duration
+    private let preloadTimeout: Duration
+    private let unloadTimeout: Duration
+    private let processTimeout: Duration
 
     /// Die Engine erwartet 16-kHz-Mono-Float32. Die Rate steht nicht in den Rohdaten und muss
     /// deshalb mitgeschickt werden (siehe M2).
     private static let sampleRate = 16_000
 
-    public init(socketPath: String) {
+    /// Timeouts sind injizierbar (Default: die bisherigen fest verdrahteten Werte). Damit können
+    /// Tests kurze Timeouts erzwingen, ohne auf die App-typischen Wartezeiten angewiesen zu sein.
+    public init(socketPath: String,
+                healthTimeout: Duration = .seconds(5),
+                preloadTimeout: Duration = .seconds(5),
+                unloadTimeout: Duration = .seconds(30),
+                processTimeout: Duration = .seconds(180)) {
         transport = HTTPUnixTransport(socketPath: socketPath)
+        self.healthTimeout = healthTimeout
+        self.preloadTimeout = preloadTimeout
+        self.unloadTimeout = unloadTimeout
+        self.processTimeout = processTimeout
     }
 
     public func health() async throws -> HealthState {
         let response = try await request("GET", "/health", body: nil, contentType: nil,
-                                         timeout: .seconds(5))
+                                         timeout: healthTimeout)
         let dto: HealthDTO = try decode(response)
         return HealthState(status: dto.status, sttLoaded: dto.stt_loaded, llmLoaded: dto.llm_loaded,
                            busy: dto.busy, sttModel: dto.stt_model, llmModel: dto.llm_model,
@@ -30,11 +44,11 @@ public struct HTTPSidecarClient: SidecarClient {
     }
 
     public func preload() async throws {
-        _ = try await request("POST", "/preload", body: nil, contentType: nil, timeout: .seconds(5))
+        _ = try await request("POST", "/preload", body: nil, contentType: nil, timeout: preloadTimeout)
     }
 
     public func unload() async throws {
-        _ = try await request("POST", "/unload", body: nil, contentType: nil, timeout: .seconds(30))
+        _ = try await request("POST", "/unload", body: nil, contentType: nil, timeout: unloadTimeout)
     }
 
     public func process(pcm: Data, mode: Mode, language: String?) async throws -> ProcessResult {
@@ -44,7 +58,7 @@ public struct HTTPSidecarClient: SidecarClient {
         // Großzügig: Ein langes Diktat plus LLM-Ladezeit kann eine Weile dauern.
         let response = try await request("POST", path, body: pcm,
                                          contentType: "application/octet-stream",
-                                         timeout: .seconds(180))
+                                         timeout: processTimeout)
         let dto: ProcessDTO = try decode(response)
         return ProcessResult(finalText: dto.final_text, rawText: dto.raw_text,
                              dictionaryText: dto.dictionary_text, mode: dto.mode,
@@ -61,8 +75,16 @@ public struct HTTPSidecarClient: SidecarClient {
         do {
             response = try await transport.send(method: method, path: path, body: body,
                                                 contentType: contentType, timeout: timeout)
-        } catch TransportError.unreachable, TransportError.timedOut {
+        } catch TransportError.unreachable {
             throw SidecarError.unreachable
+        } catch TransportError.timedOut {
+            // Anders als `.unreachable`: Die Verbindung stand, nur die Antwort blieb aus.
+            throw SidecarError.timedOut
+        } catch let error as CancellationError {
+            // Kooperativer Task-Abbruch (ab M4: Nutzer bricht ein laufendes Diktat ab) darf nicht
+            // in einen SidecarError verwandelt werden — sonst sähe ein Aufrufer, der auf
+            // `is CancellationError` prüft, den Abbruch nie.
+            throw error
         } catch {
             throw SidecarError.malformedResponse
         }
