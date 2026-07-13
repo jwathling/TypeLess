@@ -21,8 +21,19 @@ final class SpyProcessRunner: ProcessRunner, @unchecked Sendable {
     private(set) var startedCommands: [[String]] = []
     let handle = SpyProcessHandle()
 
+    /// Feuert, sobald ``run(executable:arguments:workingDirectory:)`` aufgerufen wurde — für
+    /// Tests, die ohne feste Wartezeit sicherstellen müssen, dass der Prozess tatsächlich
+    /// gestartet wurde, bevor sie z. B. die aufrufende Task abbrechen.
+    let started: AsyncStream<Void>
+    private let startedContinuation: AsyncStream<Void>.Continuation
+
+    init() {
+        (started, startedContinuation) = AsyncStream<Void>.makeStream()
+    }
+
     func run(executable: String, arguments: [String], workingDirectory: String) throws -> ProcessHandle {
         lock.lock(); startedCommands.append([executable] + arguments); lock.unlock()
+        startedContinuation.yield()
         return handle
     }
 }
@@ -175,4 +186,87 @@ func makeLifecycle(client: SidecarClient, runner: ProcessRunner) -> DefaultSidec
     await #expect(throws: LifecycleError.uvMissing("/gibt/es/nicht/uv")) {
         _ = try await lifecycle.start()
     }
+}
+
+// Finding 1 (Review, Task 4): Scheitert `waitForReady()` im Spawn-Zweig, blieb der selbst
+// gestartete Prozess bislang als Zombie zurück — der Sidecar lädt MLX-Modelle in den Speicher,
+// auf einem 16-GB-Mac kein kosmetisches Problem. `start()` muss ihn terminieren, bevor der
+// Fehler weitergereicht wird.
+@Test(.timeLimit(.minutes(1)))
+func terminiertSelbstGestartetenProzessBeiTimeout() async throws {
+    let runner = SpyProcessRunner()
+    let script: [Result<HealthState, SidecarError>] =
+        [.failure(.unreachable)] + Array(repeating: .success(health("starting")), count: 20)
+    let lifecycle = makeLifecycle(client: ScriptedClient(script), runner: runner)
+
+    await #expect(throws: LifecycleError.readyTimeout) {
+        _ = try await lifecycle.start()
+    }
+
+    #expect(runner.handle.terminateCount == 1)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func terminiertSelbstGestartetenProzessBeiFehlerzustand() async throws {
+    let runner = SpyProcessRunner()
+    let client = ScriptedClient([
+        .failure(.unreachable),
+        .success(health("failed", error: "STT-Warm-up fehlgeschlagen: 401")),
+    ])
+    let lifecycle = makeLifecycle(client: client, runner: runner)
+
+    await #expect(throws: LifecycleError.failed("STT-Warm-up fehlgeschlagen: 401")) {
+        _ = try await lifecycle.start()
+    }
+
+    #expect(runner.handle.terminateCount == 1)
+}
+
+// Gegenprobe zur eisernen Regel: Eine übernommene Instanz wird nie terminiert — auch dann nicht,
+// wenn das Warten auf ihre Bereitschaft (Adopt-Zweig, fremde Instanz fährt gerade hoch)
+// fehlschlägt. Dieser Test würde eine zu weit gefasste Behebung von Finding 1 fangen, die den
+// Adopt-Zweig versehentlich mit demselben Aufräumcode umschließt.
+@Test(.timeLimit(.minutes(1)))
+func terminiertUebernommeneInstanzNichtBeiFehlerWaehrendDesWartens() async throws {
+    let runner = SpyProcessRunner()
+    let client = ScriptedClient([
+        .success(health("starting")),
+        .success(health("starting")),
+        .success(health("failed", error: "STT-Warm-up fehlgeschlagen: 401")),
+    ])
+    let lifecycle = makeLifecycle(client: client, runner: runner)
+
+    await #expect(throws: LifecycleError.failed("STT-Warm-up fehlgeschlagen: 401")) {
+        _ = try await lifecycle.start()
+    }
+
+    #expect(runner.startedCommands.isEmpty, "eine fremde, hochfahrende Instanz darf nie einen eigenen Prozess starten")
+    #expect(runner.handle.terminateCount == 0)
+}
+
+// Finding 2 (Review, Task 4): `waitForReady()` verschluckte jeden Fehler aus `client.health()`
+// und `Task.sleep`, auch einen kooperativen Task-Abbruch — die Schleife drehte stattdessen als
+// Busy-Spin bis zum vollen `readyTimeout` und meldete danach fälschlich `readyTimeout`. Ein
+// Abbruch während des Spawn-Zweigs muss als `CancellationError` ankommen und den selbst
+// gestarteten Prozess beenden (sonst greift Finding 1 auf diesem Weg wieder).
+@Test(.timeLimit(.minutes(1)))
+func abbruchWaehrendSpawnLiefertCancellationErrorUndBeendetProzess() async throws {
+    let runner = SpyProcessRunner()
+    // Nach dem ersten Skript-Eintrag liefert ScriptedClient per Fallback immer `.unreachable` —
+    // der Sidecar bleibt also dauerhaft "nicht erreichbar", bis der Abbruch greift.
+    let client = ScriptedClient([.failure(.unreachable)])
+    let lifecycle = makeLifecycle(client: client, runner: runner)
+
+    let task = Task { try await lifecycle.start() }
+
+    // Ohne feste Wartezeit sicherstellen, dass der Prozess tatsächlich gestartet wurde, bevor
+    // abgebrochen wird.
+    var iterator = runner.started.makeAsyncIterator()
+    _ = await iterator.next()
+    task.cancel()
+
+    await #expect(throws: CancellationError.self) {
+        _ = try await task.value
+    }
+    #expect(runner.handle.terminateCount == 1)
 }
