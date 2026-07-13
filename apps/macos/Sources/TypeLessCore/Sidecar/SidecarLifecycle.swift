@@ -84,7 +84,18 @@ public actor DefaultSidecarLifecycle: SidecarLifecycle {
             arguments: ["run", "python", "-m", "typeless_engine.server"],
             workingDirectory: engineDirectory)
 
-        try await waitForReady()
+        do {
+            try await waitForReady()
+        } catch {
+            // Nur hier, im Spawn-Zweig: Was wir selbst gestartet haben, beenden wir auch selbst
+            // wieder — egal ob Timeout, `failed`-Meldung oder Abbruch (`CancellationError`).
+            // Sonst bleibt ein MLX-Prozess als Zombie im Speicher stehen (Finding 1, Review
+            // Task 4). Im Adopt-Zweig (oben) ist `ownProcess` nie gesetzt, dort passiert also
+            // strukturell nichts — die eiserne Regel bleibt unangetastet.
+            ownProcess?.terminate()
+            ownProcess = nil
+            throw error
+        }
         return .spawned
     }
 
@@ -96,11 +107,20 @@ public actor DefaultSidecarLifecycle: SidecarLifecycle {
 
     /// Pollt ``/health``, bis ``ready`` gemeldet wird. Ohne feste Wartezeit: Der Timeout ist
     /// die Reißleine, nicht die Taktung.
+    ///
+    /// Finding 2 (Review, Task 4): `try?` verschluckte früher *jeden* Fehler aus
+    /// `client.health()` und `Task.sleep` — auch einen kooperativen Task-Abbruch. Der
+    /// `SidecarClient` reicht `CancellationError` bewusst unverpackt nach oben (siehe
+    /// `SidecarClient.swift`), damit Aufrufer ihn erkennen können; diese Schleife muss ihn also
+    /// durchreichen statt als Busy-Spin bis zum vollen `readyTimeout` weiterzulaufen.
     private func waitForReady() async throws {
         let deadline = ContinuousClock.now.advanced(by: readyTimeout)
 
         while ContinuousClock.now < deadline {
-            if let state = try? await client.health() {
+            try Task.checkCancellation()
+
+            do {
+                let state = try await client.health()
                 switch state.status {
                 case "ready":
                     return
@@ -109,8 +129,17 @@ public actor DefaultSidecarLifecycle: SidecarLifecycle {
                 default:
                     break  // "starting" — weiter warten
                 }
+            } catch let error as CancellationError {
+                throw error
+            } catch let error as LifecycleError {
+                throw error
+            } catch {
+                // Sonstiger Fehler aus `client.health()` (z. B. SidecarError.unreachable/
+                // .timedOut) — der Sidecar antwortet noch nicht wie erwartet, einfach weiter
+                // pollen, bis der Timeout oben greift.
             }
-            try? await Task.sleep(for: pollInterval)
+
+            try await Task.sleep(for: pollInterval)
         }
         throw LifecycleError.readyTimeout
     }
