@@ -8,31 +8,73 @@ final class SpyProcessHandle: ProcessHandle, @unchecked Sendable {
     private let lock = NSLock()
     private var running = true
     var terminateCount = 0
+    var forceTerminateCount = 0
+
+    /// Ob `terminate()` den Prozess sofort beendet (Default — reicht für alle Tests, denen es
+    /// nur um *ob* und *wie oft* terminiert wurde, geht) oder ob der Test selbst über
+    /// ``simulateExit()`` steuert, wann er wirklich stirbt.
+    ///
+    /// Für C1 (Review) ist genau das der Punkt: In Wirklichkeit beendet SIGTERM einen Prozess
+    /// nicht synchron — der Reviewer hat gemessen, dass `/health` 0,05 s nach dem Signal noch
+    /// "ready" meldet. Mit `instantExit == true` (dem alten, unveränderten Verhalten dieses
+    /// Doubles) wäre dieses Zeitfenster im Test unsichtbar, weil der Prozess sofort tot ist —
+    /// genau das hat die C1-Lücke bislang vor jedem Test verborgen.
+    private let instantExit: Bool
+
+    /// Feuert, sobald `terminate()` aufgerufen wurde — für Tests, die ohne feste Wartezeit
+    /// beobachten wollen, dass SIGTERM bereits verschickt wurde.
+    let terminateCalled: AsyncStream<Void>
+    private let terminateCalledContinuation: AsyncStream<Void>.Continuation
+
+    init(instantExit: Bool = true) {
+        self.instantExit = instantExit
+        (terminateCalled, terminateCalledContinuation) = AsyncStream<Void>.makeStream()
+    }
 
     var isRunning: Bool { lock.lock(); defer { lock.unlock() }; return running }
 
     func terminate() {
-        lock.lock(); terminateCount += 1; running = false; lock.unlock()
+        lock.lock()
+        terminateCount += 1
+        if instantExit { running = false }
+        lock.unlock()
+        terminateCalledContinuation.yield()
+    }
+
+    func forceTerminate() {
+        lock.lock(); forceTerminateCount += 1; running = false; lock.unlock()
+    }
+
+    /// Simuliert das tatsächliche Prozessende — vom Test gezielt ausgelöst, wenn `instantExit`
+    /// `false` ist.
+    func simulateExit() {
+        lock.lock(); running = false; lock.unlock()
     }
 }
 
 final class SpyProcessRunner: ProcessRunner, @unchecked Sendable {
     private let lock = NSLock()
     private(set) var startedCommands: [[String]] = []
-    let handle = SpyProcessHandle()
+    private(set) var startedEnvironments: [[String: String]] = []
+    let handle: SpyProcessHandle
 
-    /// Feuert, sobald ``run(executable:arguments:workingDirectory:)`` aufgerufen wurde — für
-    /// Tests, die ohne feste Wartezeit sicherstellen müssen, dass der Prozess tatsächlich
-    /// gestartet wurde, bevor sie z. B. die aufrufende Task abbrechen.
+    /// Feuert, sobald ``run(executable:arguments:workingDirectory:environment:)`` aufgerufen
+    /// wurde — für Tests, die ohne feste Wartezeit sicherstellen müssen, dass der Prozess
+    /// tatsächlich gestartet wurde, bevor sie z. B. die aufrufende Task abbrechen.
     let started: AsyncStream<Void>
     private let startedContinuation: AsyncStream<Void>.Continuation
 
-    init() {
+    init(instantExit: Bool = true) {
+        handle = SpyProcessHandle(instantExit: instantExit)
         (started, startedContinuation) = AsyncStream<Void>.makeStream()
     }
 
-    func run(executable: String, arguments: [String], workingDirectory: String) throws -> ProcessHandle {
-        lock.lock(); startedCommands.append([executable] + arguments); lock.unlock()
+    func run(executable: String, arguments: [String], workingDirectory: String,
+             environment: [String: String]) throws -> ProcessHandle {
+        lock.lock()
+        startedCommands.append([executable] + arguments)
+        startedEnvironments.append(environment)
+        lock.unlock()
         startedContinuation.yield()
         return handle
     }
@@ -74,12 +116,16 @@ func health(_ status: String, error: String? = nil) -> HealthState {
                 sttModel: "whisper", llmModel: "qwen", error: error)
 }
 
-func makeLifecycle(client: SidecarClient, runner: ProcessRunner) -> DefaultSidecarLifecycle {
+func makeLifecycle(client: SidecarClient, runner: ProcessRunner,
+                    socketPath: String = "/tmp/typeless-test.sock") -> DefaultSidecarLifecycle {
     DefaultSidecarLifecycle(client: client, runner: runner,
                             engineDirectory: FileManager.default.temporaryDirectory.path,
                             uvPath: "/bin/echo",          // existiert garantiert
+                            socketPath: socketPath,
                             readyTimeout: .milliseconds(500),
-                            pollInterval: .milliseconds(10))
+                            pollInterval: .milliseconds(10),
+                            terminateTimeout: .milliseconds(200),
+                            terminatePollInterval: .milliseconds(5))
 }
 
 // MARK: - Tests
@@ -166,6 +212,7 @@ func makeLifecycle(client: SidecarClient, runner: ProcessRunner) -> DefaultSidec
         runner: SpyProcessRunner(),
         engineDirectory: "/gibt/es/nicht",
         uvPath: "/bin/echo",
+        socketPath: "/tmp/typeless-test.sock",
         readyTimeout: .milliseconds(500),
         pollInterval: .milliseconds(10))
 
@@ -180,6 +227,7 @@ func makeLifecycle(client: SidecarClient, runner: ProcessRunner) -> DefaultSidec
         runner: SpyProcessRunner(),
         engineDirectory: FileManager.default.temporaryDirectory.path,
         uvPath: "/gibt/es/nicht/uv",
+        socketPath: "/tmp/typeless-test.sock",
         readyTimeout: .milliseconds(500),
         pollInterval: .milliseconds(10))
 
@@ -269,4 +317,74 @@ func abbruchWaehrendSpawnLiefertCancellationErrorUndBeendetProzess() async throw
         _ = try await task.value
     }
     #expect(runner.handle.terminateCount == 1)
+}
+
+// Finding I2 (Review): Der Client verbindet auf `settings.socketPath`, dem gespawnten
+// Kindprozess wurde dieser Pfad aber nie mitgegeben — er las stattdessen seinen eigenen
+// Default aus `engine/typeless_engine/config.py`. Weichen beide Pfade voneinander ab, startet
+// die App eine kerngesunde Engine, die auf einem anderen Socket lauscht, und meldet nach dem
+// vollen `readyTimeout` fälschlich "Zeitüberschreitung beim Start" — bei laufender Engine.
+@Test func reichtSocketPfadAlsUmgebungsvariableAnDenGespawntenProzessDurch() async throws {
+    let runner = SpyProcessRunner()
+    let client = ScriptedClient([.failure(.unreachable), .success(health("ready"))])
+    let lifecycle = makeLifecycle(client: client, runner: runner, socketPath: "/tmp/custom-typeless.sock")
+
+    _ = try await lifecycle.start()
+
+    let environment = try #require(runner.startedEnvironments.first)
+    #expect(environment["TYPELESS_SOCKET_PATH"] == "/tmp/custom-typeless.sock")
+}
+
+// Finding C1 (Review): `stop()` schickte bisher nur SIGTERM und kehrte sofort zurück, ohne auf
+// das tatsächliche Prozessende zu warten. In Wirklichkeit beendet SIGTERM einen Prozess nicht
+// synchron — der Reviewer hat gemessen: 0,05 s danach antwortet `/health` noch mit "ready",
+// erst nach ~0,22 s ist der Prozess tot. Kehrt `stop()` in diesem Fenster zurück, hält ein
+// direkt anschließendes `start()` den sterbenden Prozess für gesund und adoptiert ihn, statt
+// selbst einen neuen zu starten. Dieser Test bildet das Fenster nach, indem `terminate()` auf
+// dem Test-Double den Prozess NICHT sofort beendet — der Test selbst löst das Ende gezielt über
+// `simulateExit()` aus — und belegt strukturell, dass `stop()` nicht zurückkehrt, solange der
+// Prozess laut `isRunning` noch lebt.
+@Test(.timeLimit(.minutes(1)))
+func stopWartetAufTatsaechlichesProzessendeBevorSieZurueckkehrt() async throws {
+    let runner = SpyProcessRunner(instantExit: false)
+    let client = ScriptedClient([.failure(.unreachable), .success(health("ready"))])
+    let lifecycle = makeLifecycle(client: client, runner: runner)
+    _ = try await lifecycle.start()
+
+    let stopReturned = Flag()
+    let stopTask = Task {
+        await lifecycle.stop()
+        stopReturned.set()
+    }
+
+    // Ohne feste Wartezeit sicherstellen, dass SIGTERM tatsächlich verschickt wurde, bevor wir
+    // behaupten, `stop()` sei noch nicht zurück.
+    var terminateIterator = runner.handle.terminateCalled.makeAsyncIterator()
+    _ = await terminateIterator.next()
+    #expect(runner.handle.terminateCount == 1)
+
+    // Kooperative Yields statt fester Wartezeit: Sie geben `stop()` jede realistische Chance,
+    // (fehlerhaft) vorzeitig zurückzukehren, BEVOR wir den Prozess sterben lassen. Bei
+    // korrektem Code kann `stopReturned` hier nicht gesetzt sein, egal wie oft wir yielden.
+    for _ in 0 ..< 200 { await Task.yield() }
+    #expect(!stopReturned.isSet,
+            "stop() darf nicht zurückkehren, solange der Prozess laut isRunning noch lebt")
+    #expect(runner.handle.isRunning, "Testaufbau: der Prozess muss zu diesem Zeitpunkt noch laufen")
+
+    // Erst jetzt das tatsächliche Prozessende simulieren.
+    runner.handle.simulateExit()
+    await stopTask.value
+
+    #expect(stopReturned.isSet)
+    #expect(runner.handle.forceTerminateCount == 0,
+            "ein Prozess, der rechtzeitig auf SIGTERM reagiert, braucht kein SIGKILL")
+}
+
+/// Threadsicheres Flag für Tests, die ohne feste Wartezeit belegen wollen, dass ein bestimmtes
+/// Ereignis (noch) nicht eingetreten ist.
+final class Flag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    func set() { lock.lock(); value = true; lock.unlock() }
+    var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
 }

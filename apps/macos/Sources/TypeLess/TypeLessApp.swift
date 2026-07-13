@@ -16,7 +16,8 @@ struct TypeLessApp: App {
             client: client,
             runner: FoundationProcessRunner(),
             engineDirectory: settings.engineDirectory,
-            uvPath: settings.uvPath)
+            uvPath: settings.uvPath,
+            socketPath: settings.socketPath)
 
         let state = AppState(lifecycle: lifecycle, client: client,
                              permissions: SystemPermissionsService())

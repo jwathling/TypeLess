@@ -102,7 +102,14 @@ public final class AppState {
     }
 
     /// Ein Poll-Durchgang. Liefert das Intervall bis zum nächsten.
+    ///
+    /// Finding I1 (Review): Außerhalb der Tests wurde ``refreshPermissions()`` nie aufgerufen —
+    /// `permissions` blieb für die gesamte Laufzeit auf dem Stand aus `init`. Erteilt der Nutzer
+    /// ein fehlendes Recht in den Systemeinstellungen, blieb das Menü trotzdem dauerhaft bei ⚠
+    /// stehen. Die drei Abfragen sind billig, deshalb hier im ohnehin laufenden Poll-Takt mit
+    /// erledigen.
     private func pollOnce() async -> Duration {
+        refreshPermissions()
         do {
             let health = try await client.health()
             switch health.status {

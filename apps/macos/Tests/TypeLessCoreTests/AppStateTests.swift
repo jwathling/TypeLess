@@ -160,6 +160,25 @@ struct FakePermissions: PermissionsService {
     func openSettings(for permission: Permission) {}
 }
 
+/// Für Finding I1 (Review): anders als ``FakePermissions`` kann sich der Zustand während einer
+/// laufenden Sitzung ändern — genau wie beim echten ``SystemPermissionsService``, wenn der
+/// Nutzer ein Recht in den Systemeinstellungen erteilt, während TypeLess bereits läuft.
+final class MutablePermissions: PermissionsService, @unchecked Sendable {
+    private let lock = NSLock()
+    private var granted: Bool
+
+    init(granted: Bool) { self.granted = granted }
+
+    func setGranted(_ value: Bool) { lock.lock(); granted = value; lock.unlock() }
+
+    func status() -> PermissionStatus {
+        lock.lock(); defer { lock.unlock() }
+        return PermissionStatus(microphone: granted, accessibility: granted, inputMonitoring: granted)
+    }
+
+    func openSettings(for permission: Permission) {}
+}
+
 @MainActor
 func makeAppState(lifecycle: SidecarLifecycle, client: SidecarClient) -> AppState {
     AppState(lifecycle: lifecycle, client: client, permissions: FakePermissions(granted: true),
@@ -329,6 +348,41 @@ func engineMeldetFailedStatusWirdMitKlartextUebernommen() async {
     _ = await iterator.next()
     #expect(state.engine == .failed("STT-Warm-up fehlgeschlagen: 401"),
             "der Klartext-Grund aus der Engine, kein generischer Text")
+
+    client.release()
+    await state.shutdown()
+}
+
+// Finding I1 (Review): `refreshPermissions()` wurde außerhalb der Tests nie aufgerufen —
+// `permissions` blieb für die gesamte Laufzeit der App auf dem Stand aus `init`. Erteilt der
+// Nutzer ein fehlendes Recht in den Systemeinstellungen, während TypeLess bereits läuft, blieb
+// das Menü trotzdem dauerhaft bei ⚠ stehen. Dieser Test belegt, dass eine Änderung des
+// Berechtigungsstatus während einer laufenden Sitzung tatsächlich in `AppState.permissions`
+// ankommt — ohne dass irgendjemand `refreshPermissions()` von außen aufruft.
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func berechtigungsAenderungWaehrendDerSitzungKommtInAppStateAn() async {
+    let permissions = MutablePermissions(granted: false)
+    let client = GatedClient(.success(health("ready")))
+    let state = AppState(lifecycle: FakeLifecycle(.success(.spawned)), client: client,
+                         permissions: permissions,
+                         pollIntervalStarting: .milliseconds(10), pollIntervalReady: .milliseconds(10))
+    await state.start()
+    #expect(state.permissions.microphone == false)
+
+    var iterator = client.started.makeAsyncIterator()
+    _ = await iterator.next()   // erster Poll (ausgelöst von startPolling() in start()) ist in Flug
+
+    // Der Nutzer erteilt das Recht jetzt, während die Sitzung bereits läuft — niemand ruft
+    // refreshPermissions() explizit auf.
+    permissions.setGranted(true)
+    client.release()
+
+    _ = await iterator.next()   // nächster Poll in Flug -> voriger vollständig verarbeitet
+    #expect(state.permissions.microphone == true,
+            "eine während der Sitzung erteilte Berechtigung muss beim nächsten Poll ankommen")
+    #expect(state.permissions.accessibility == true)
+    #expect(state.permissions.inputMonitoring == true)
 
     client.release()
     await state.shutdown()
