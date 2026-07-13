@@ -54,3 +54,20 @@ import Testing
                                      body: nil, contentType: nil, timeout: .seconds(2))
     }
 }
+
+// Finding 1 (Review, Task 2): Nimmt der Server die Verbindung an, antwortet aber nie, muss der
+// Timeout trotzdem greifen. Harte Obergrenze über `.timeLimit`, damit ein Regression nicht die
+// ganze Suite unbegrenzt hängen lässt, sondern der Test selbst nach spätestens einer Minute als
+// fehlgeschlagen markiert wird.
+@Test(.timeLimit(.minutes(1)))
+func liefertTimeoutWennVerbindungStehtAberServerNieAntwortet() async throws {
+    let server = try SilentSidecarServer()
+    defer { server.stop() }
+
+    let transport = HTTPUnixTransport(socketPath: server.socketPath)
+
+    await #expect(throws: TransportError.timedOut) {
+        _ = try await transport.send(method: "GET", path: "/health",
+                                     body: nil, contentType: nil, timeout: .milliseconds(300))
+    }
+}
