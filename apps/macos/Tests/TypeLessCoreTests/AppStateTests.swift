@@ -86,6 +86,7 @@ final class GatedClient: SidecarClient, @unchecked Sendable {
     private var result: Result<HealthState, SidecarError>
     private var pending: [CheckedContinuation<Void, Never>] = []
     private var maxConcurrent = 0
+    private var calls = 0
 
     /// Feuert, sobald ein Aufruf seine Continuation registriert hat — ab diesem Zeitpunkt ist
     /// er über ``release()`` garantiert abholbar (kein Rennen zwischen "Aufruf gestartet" und
@@ -106,10 +107,18 @@ final class GatedClient: SidecarClient, @unchecked Sendable {
     /// Poll-Task-Verwaltung darf sie nie über 1 steigen.
     var maxConcurrentCalls: Int { lock.lock(); defer { lock.unlock() }; return maxConcurrent }
 
+    /// Gesamtzahl aller je begonnenen `health()`-Aufrufe — anders als ``maxConcurrentCalls``
+    /// (misst nur GLEICHZEITIGES Hängen) zählt das auch Aufrufe, die zeitlich klar
+    /// nacheinander liegen. Damit lässt sich belegen, dass nach einem bestimmten Zeitpunkt
+    /// KEIN weiterer Aufruf mehr eintrifft — auch nicht verspätet von einer eigentlich schon
+    /// als beendet angenommenen Task (s. ``doppelterStartUeberlagertKeinePollTasks()``).
+    var totalCalls: Int { lock.lock(); defer { lock.unlock() }; return calls }
+
     /// Synchron aus demselben Grund wie ``StaticClient/currentState()`` — auch hier stehen
     /// `lock`/`unlock` nicht direkt im `async`-Funktionskörper von ``health()``.
     private func register(_ continuation: CheckedContinuation<Void, Never>) {
         lock.lock()
+        calls += 1
         pending.append(continuation)
         maxConcurrent = max(maxConcurrent, pending.count)
         lock.unlock()
@@ -380,11 +389,45 @@ func stopPollingWartetAufLaufendenPollBevorZustandGesetztWird() async {
             "ein verspätet eintreffender Poll darf den Endzustand von shutdown() nicht überschreiben")
 }
 
+// `maxConcurrentCalls` allein reicht nicht aus, um zu belegen, dass ein zweiter start() die
+// ALTE Poll-Task wirklich beendet: Es misst nur, ob je zwei Aufrufe GLEICHZEITIG hingen — das
+// Messfenster schließt sich, sobald sich der neue Poll mit seinem ersten Aufruf meldet. Eine
+// alte, im Fehlerfall weiterlaufende Task steckt zu diesem Zeitpunkt aber typischerweise noch
+// im `Task.sleep` nach ihrem freigegebenen Aufruf und hat ihren nächsten `health()`-Aufruf noch
+// gar nicht registriert — die Überlappung existiert real, liegt aber außerhalb des
+// Messfensters, und der Test bliebe grün, selbst wenn `startPolling()` den alten Poll nie
+// abbräche (empirisch belegt, s. Report zu Task 6).
+//
+// Deshalb zusätzlich: Nach dem zweiten start() wird bewusst NICHTS mehr freigegeben — weder der
+// neue Poll (der käme sonst selbst zu einem weiteren Aufruf) noch sonst irgendwer. Jeder
+// `health()`-Aufruf, der über die zwei unvermeidlichen (den ursprünglichen ersten Poll und den
+// ersten Aufruf des neuen Polls) hinausgeht, kann also nur von einer eigentlich schon beendet
+// geglaubten ALTEN Task stammen. Geprüft wird das über `client.totalCalls` — bewusst NICHT als
+// Vorher/Nachher-Differenz um eine einzelne `iterator.next()`-Messung herum (ein früher Anlauf
+// tat das und war dadurch selbst flaky: Wessen Aufruf `iterator.next()` als "der neue Poll"
+// auffasst, hängt vom Scheduling ab — bei knappem Timing kann der verräterische dritte Aufruf
+// der alten Task schon VOR dieser Messung passiert und damit fälschlich im "Vorher"-Wert
+// mitgezählt sein, was den Fehler verdeckt hätte). Robuster: Erst 500 `Task.yield()`s geben
+// jeder anstehenden (auch fehlerhaften) Aktivität reichlich Gelegenheit, sich zu zeigen — ganz
+// gleich, in welcher Reihenfolge sie eintrifft —, DANACH wird gegen die einzig korrekte Zahl
+// geprüft: genau 2. Bei korrektem Code ist die alte Task durch `stopPolling()` längst beendet
+// und kann strukturell keinen weiteren Aufruf mehr absetzen — beliebig viele Yields können also
+// nie einen Fehlalarm auslösen. Bei fehlerhaftem Code (fehlendes `stopPolling()` in
+// `startPolling()`) setzt sie zuverlässig einen dritten Aufruf ab, der (da wir nichts mehr
+// freigeben) dort hängen bleibt und die Zahl auf 3 hebt.
+//
+// Damit dieser dritte Aufruf ohne feste Wartezeit im Test sichtbar wird, laufen die
+// Poll-Intervalle in diesem Test (anders als über `makeAppState()`) nahe Null: Die
+// `Task.sleep(for:)`-Pause zwischen zwei Polls wird dadurch zu einem reinen Scheduler-Hop, den
+// die `Task.yield()`-Schleife zuverlässig überbrücken kann, statt auf echte Zeit angewiesen zu
+// sein.
 @MainActor
 @Test(.timeLimit(.minutes(1)))
 func doppelterStartUeberlagertKeinePollTasks() async {
     let client = GatedClient(.success(health("ready")))
-    let state = makeAppState(lifecycle: FakeLifecycle(.success(.spawned)), client: client)
+    let state = AppState(lifecycle: FakeLifecycle(.success(.spawned)), client: client,
+                          permissions: FakePermissions(granted: true),
+                          pollIntervalStarting: .zero, pollIntervalReady: .zero)
     await state.start()
 
     var iterator = client.started.makeAsyncIterator()
@@ -403,6 +446,18 @@ func doppelterStartUeberlagertKeinePollTasks() async {
 
     #expect(client.maxConcurrentCalls == 1,
             "zwei start()-Aufrufe dürfen nie zwei Polls gleichzeitig laufen lassen")
+
+    // Ab hier bewusst KEIN weiterer client.release() mehr, bevor die Schleife unten fertig ist —
+    // s. Kommentar oben, warum erst NACH den Yields gemessen wird, nicht davor/danach verglichen.
+    for _ in 0 ..< 500 { await Task.yield() }
+
+    #expect(client.totalCalls == 2,
+            """
+            nach dem zweiten start() dürfen insgesamt nur zwei health()-Aufrufe je stattgefunden \
+            haben (der ursprüngliche erste Poll und der erste Aufruf des neuen Polls) — ein \
+            dritter kann nur von einer eigentlich schon beendet geglaubten ALTEN Poll-Task \
+            stammen
+            """)
 
     client.release()
     await state.shutdown()
