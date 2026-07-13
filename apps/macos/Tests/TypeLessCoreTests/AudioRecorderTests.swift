@@ -6,13 +6,16 @@ import Testing
 /// Wird von den Koordinator-Tests (Task 4) wiederverwendet.
 actor FakeRecorder: AudioRecorder {
     private var samples: [Float]
+    private var verloreneHaeppchen: Int
     private var fehlerBeimStart: AudioRecorderError?
     private(set) var laeuft = false
     private(set) var startCount = 0
     private(set) var stopCount = 0
 
-    init(samples: [Float] = [], fehlerBeimStart: AudioRecorderError? = nil) {
+    init(samples: [Float] = [], verloreneHaeppchen: Int = 0,
+         fehlerBeimStart: AudioRecorderError? = nil) {
         self.samples = samples
+        self.verloreneHaeppchen = verloreneHaeppchen
         self.fehlerBeimStart = fehlerBeimStart
     }
 
@@ -28,7 +31,7 @@ actor FakeRecorder: AudioRecorder {
         stopCount += 1
         guard laeuft else { throw AudioRecorderError.notRecording }
         laeuft = false
-        return AudioRecording(werte: samples)
+        return AudioRecording(werte: samples, verloreneHaeppchen: verloreneHaeppchen)
     }
 }
 
