@@ -25,12 +25,22 @@ mlx = [
 server = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
+    # runtime.py importiert `anyio.to_thread` direkt (Worker-Thread für blockierende
+    # Backend-Aufrufe) — heute nur zufällig transitiv über fastapi/starlette vorhanden.
+    "anyio>=4.0",
 ]
 dev = [
     "pytest>=8.0",
     "ruff>=0.5",
     "black>=24.0",
     "mypy>=1.10",
+    # Die Server-Tests laufen ohne MLX, brauchen aber FastAPI und einen HTTP-Client.
+    # Beides ist reines Python und überall installierbar.
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "httpx>=0.27",
+    # Siehe server-Extra: runtime.py (von den Tests importiert) braucht anyio direkt.
+    "anyio>=4.0",
 ]
 
 [project.scripts]
@@ -73,3 +83,6 @@ markers = [
     "slow: Tests, die echte MLX-Modelle laden (nur Apple Silicon).",
 ]
 testpaths = ["tests"]
+# Kein globales `--basetemp`: Das räumt pytest bei *jedem* Start per rm_rf ab und würde
+# parallele Läufe (IDE + Terminal) gegeneinander laufen lassen. Das Pfadlängenproblem der
+# Unix-Domain-Sockets löst die `socket_dir`-Fixture in tests/test_server_socket.py lokal.

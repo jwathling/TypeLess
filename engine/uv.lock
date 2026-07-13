@@ -1984,10 +1984,14 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
+    { name = "anyio" },
     { name = "black" },
+    { name = "fastapi" },
+    { name = "httpx" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "ruff" },
+    { name = "uvicorn" },
 ]
 mlx = [
     { name = "mlx-lm" },
@@ -1995,14 +1999,19 @@ mlx = [
     { name = "numba" },
 ]
 server = [
+    { name = "anyio" },
     { name = "fastapi" },
     { name = "uvicorn" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", marker = "extra == 'dev'", specifier = ">=4.0" },
+    { name = "anyio", marker = "extra == 'server'", specifier = ">=4.0" },
     { name = "black", marker = "extra == 'dev'", specifier = ">=24.0" },
+    { name = "fastapi", marker = "extra == 'dev'", specifier = ">=0.110" },
     { name = "fastapi", marker = "extra == 'server'", specifier = ">=0.110" },
+    { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "mlx-lm", marker = "extra == 'mlx'", specifier = ">=0.19" },
     { name = "mlx-whisper", marker = "extra == 'mlx'", specifier = ">=0.4" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
@@ -2013,6 +2022,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
     { name = "typer", specifier = ">=0.12" },
+    { name = "uvicorn", marker = "extra == 'dev'", specifier = ">=0.29" },
     { name = "uvicorn", marker = "extra == 'server'", specifier = ">=0.29" },
 ]
 provides-extras = ["mlx", "server", "dev"]
