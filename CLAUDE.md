@@ -11,8 +11,24 @@ Native **SwiftUI-Shell** (Hotkey, Audio, Overlay, Text-Einfügen) + **Python-MLX
 (STT + LLM), verbunden über einen lokalen **Unix-Domain-Socket** (kein TCP).
 
 ```
-apps/macos/   # SwiftUI-App: Hotkey, Audio, Overlay, Einfügen, Settings   (ab M3, nur macOS)
+apps/macos/   # SwiftUI-App: Hotkey, Audio, Overlay, Einfügen, Settings   (M3 fertig, nur macOS)
 engine/       # Python-Sidecar: STT + LLM + Wörterbuch + Pipeline          (M1 fertig)
+```
+
+`apps/macos/` (Swift-Package mit drei Targets, s. `apps/macos/README.md`):
+
+```
+Sources/TypeLessCore/     # Bibliothek ohne jede UI (kein SwiftUI-/AppKit-UI-Import), daher
+                          # vollständig testbar ohne ein Fenster zu öffnen.
+  Sidecar/                # HTTPUnixTransport, SidecarClient, SidecarLifecycle (UDS zur Engine)
+  Permissions/             # PermissionsService (Mikrofon/Bedienungshilfen/Eingabeüberwachung)
+  Settings/                 # SettingsStore (engineDirectory/socketPath/uvPath, UserDefaults)
+  AppState.swift            # @MainActor @Observable Zustandsautomat — das Bindeglied zur UI
+Sources/TypeLess/          # Dünne SwiftUI-Hülle (MenuBarExtra) — zeigt nur an, was AppState
+                          # sagt, enthält selbst keine Logik. TypeLessApp.swift (Komposition +
+                          # App-Delegate für Start/Beenden), MenuContent.swift (Menüinhalt).
+Tests/TypeLessCoreTests/  # 43 Tests (Swift Testing), reine Mocks/Fakes — kein echter Sidecar
+                          # nötig.
 ```
 
 Engine-Datenfluss:
@@ -68,6 +84,28 @@ Persönliches Wörterbuch (deterministisch, vor dem LLM): JSON unter
 `~/Library/Application Support/TypeLess/dictionary.json` (Default-Pfad), Beispiel in
 `engine/examples/dictionary.example.json`.
 
+## macOS-Shell entwickeln & testen
+
+```bash
+cd apps/macos
+swift build && swift test        # 43 Tests (Swift Testing), reine Mocks — kein Sidecar nötig
+
+bash scripts/build-app.sh        # baut TypeLess.app aus dem Repo-Root (relativer Pfad ab dort)
+open apps/macos/TypeLess.app
+```
+
+`scripts/build-app.sh` erzeugt ein echtes `.app`-Bundle (macOS vergibt Mikrofon-/
+Accessibility-Rechte an eine Bundle-Identität, nicht an ein nacktes Binary) und signiert es
+**ad-hoc** (`codesign --sign -`) — für den persönlichen Gebrauch ausreichend, aber die
+Signatur-Identität wechselt bei jedem Neubau. macOS kann deshalb nach einem Neubau **erneut**
+nach Mikrofon-/Accessibility-/Eingabeüberwachungs-Rechten fragen. Ein echtes Zertifikat gibt es
+erst in M8.
+
+Die App startet den Sidecar selbst (spekulativ übernimmt sie eine bereits laufende Instanz statt
+eine zweite zu spawnen) und beendet einen selbst gestarteten Sidecar beim Beenden wieder mit —
+egal ob über den Menü-Button, Cmd+Q oder „Beenden“ im Dock (`applicationShouldTerminate` in
+`TypeLessApp.swift` fängt **jeden** dieser Wege ab, s. Kommentar dort).
+
 ## Aktueller Stand
 
 - [x] **M1** — Engine-Kern: Interfaces, Wörterbuch, Modi (Diktat/Prompt/Email/Slack/
@@ -89,8 +127,16 @@ Persönliches Wörterbuch (deterministisch, vor dem LLM): JSON unter
   - Verarbeitung ist **serialisiert** (Lock); ein Unload fällt nie in eine laufende
     Generierung. Socket-Datei wird beim Start/Ende aufgeräumt; ein **lebender** Sidecar wird
     per `connect()`-Probe erkannt und nicht überschrieben.
-- [ ] **M3** Swift-Shell · **M4** Audio+Hotkey+Overlay · **M5** Einfügen · **M6** Modi-
-  Umschalter · **M7** Settings-UI · **M8** Polish/Packaging.
+- [x] **M3** — Swift-Shell: `TypeLessCore` (HTTP-Transport über UDS, `SidecarClient`,
+  `SidecarLifecycle` — übernimmt einen laufenden Sidecar oder startet ihn selbst,
+  `PermissionsService`, `SettingsStore`, `AppState` als `@MainActor @Observable`-
+  Zustandsautomat) + dünne `MenuBarExtra`-Oberfläche (`LSUIElement`, kein Dock-Icon). 43 Tests
+  grün, **gegen die echte Engine verifiziert** (Selbststart, Übernahme einer laufenden Instanz,
+  Fehlerfall bei fehlendem Engine-Verzeichnis — je über Prozesstabelle und Menü-Text belegt).
+  Beenden über Menü-Button, Cmd+Q **und** Dock laufen alle durch denselben
+  `applicationShouldTerminate`-Pfad — kein verwaister Sidecar.
+- [ ] **M4** Audio+Hotkey+Overlay · **M5** Einfügen · **M6** Modi-Umschalter · **M7**
+  Settings-UI · **M8** Polish/Packaging.
 
 ## Messwerte (M1, Apple Silicon, 16 GB)
 

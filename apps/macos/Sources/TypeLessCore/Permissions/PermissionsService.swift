@@ -5,7 +5,10 @@ import Foundation
 import IOKit.hid
 
 /// Die drei Berechtigungen, die TypeLess braucht.
-public enum Permission: Sendable, CaseIterable {
+///
+/// `Hashable`: Wird für `ForEach(Permission.allCases, id: \.self)` im Menü (M3) gebraucht — ohne
+/// diese Konformität kompiliert `id: \.self` nicht.
+public enum Permission: Sendable, CaseIterable, Hashable {
     /// Für die Aufnahme (ab M4).
     case microphone
     /// Für das Text-Einfügen an der Cursorposition (ab M5).
