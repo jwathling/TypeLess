@@ -181,6 +181,11 @@ class EngineRuntime:
 
     async def preload(self) -> None:
         """Lädt das LLM (spekulativ beim Hotkey-Druck). Mehrfach aufrufbar."""
+        if self._startup_error is not None:
+            # Ohne funktionierendes STT wird nie transkribiert — dann muss auch kein LLM
+            # (~2 GB) in einen Prozess geladen werden, der ohnehin nichts verarbeiten kann.
+            _log.warning("Preload übersprungen: Sidecar ist nicht einsatzbereit.")
+            return
         async with self._lock:
             await self._preload_unlocked()
 
