@@ -50,6 +50,18 @@ public actor AVAudioEngineRecorder: AudioRecorder {
     }
     private var zustand: Zustand = .gestoppt
 
+    /// Signalisiert einem gerade laufenden `start()`, dass ein `stop()` genau im Fenster
+    /// `.startet` ankam (Important-Finding, Task 2 M4). In diesem Fenster existieren weder Tap
+    /// noch laufende Engine — `stop()` kann also nichts synchron abräumen, sondern markiert
+    /// hier nur den Wunsch. `start()` prüft das Flag, sobald das Berechtigungs-Gate sich löst,
+    /// und bricht dann ab, BEVOR es irgendeine Hardware anfasst. Ohne das lief `start()` nach
+    /// dem Gate unbeirrt weiter — Tap installieren, Engine starten — und das Mikrofon blieb
+    /// endlos offen (heißer Aufnahmezustand): Der nächste `start()` tat nichts mehr (Zustand ja
+    /// schon `.laeuft`), und der nächste `stop()` lieferte die gesamte Zwischenzeit als Diktat.
+    /// Gehört ausschließlich zum jeweils laufenden `start()`-Versuch — jeder Ausstieg aus
+    /// `.startet` setzt es zurück (s. `start()`), damit es keinen künftigen Versuch verklemmt.
+    private var abbruchAngefordert = false
+
     /// Mikrofon-Berechtigungsprüfung. Für Tests überschreibbar (Default: die echte TCC-Abfrage
     /// über `AVCaptureDevice`) — genau der `await`, der laut Review-Finding 1 zu Task 2 das
     /// Reentrancy-Fenster in `start()` öffnet, wenn man ihn *vor* der Zustandsreservierung
@@ -110,13 +122,26 @@ public actor AVAudioEngineRecorder: AudioRecorder {
         // `AVAudioEngine` nicht zu und quittiert es mit einem Laufzeitabbruch (kein fangbarer
         // Swift-Fehler). `.startet` ist bewusst von `.laeuft` unterschieden: Ein `stop()` in
         // diesem Fenster (Tap noch nicht installiert) soll sauber `.notRecording` werfen, statt
-        // eine halb aufgebaute Aufnahme abzureißen.
+        // eine halb aufgebaute Aufnahme abzureißen — UND diesen Startvorgang selbst abbrechen
+        // (`abbruchAngefordert`, s. dort), damit hinterher kein Mikrofon offen bleibt.
         zustand = .startet
 
         do {
             // Berechtigung: Ohne sie liefert das Mikrofon nur Stille — wir wollen den echten Grund.
             guard await mikrofonPruefung() else {
                 throw AudioRecorderError.microphoneDenied
+            }
+
+            // Important-Finding (Task 2, M4): Genau hier, direkt nach dem einzigen Suspension-
+            // Punkt in diesem Ablauf, kann inzwischen ein `stop()` im Fenster `.startet`
+            // angekommen sein (typischer Fall: der Nutzer lässt die Taste los, während noch der
+            // macOS-Berechtigungsdialog hängt, und klickt erst danach „Erlauben"). Ohne diese
+            // Prüfung würde `start()` unbeirrt weiterlaufen und Tap sowie Engine aufbauen, obwohl
+            // das zugehörige Loslassen längst verbraucht ist — das Mikrofon bliebe endlos offen.
+            // Deshalb: abbrechen, BEVOR irgendeine Hardware angefasst wird (kein
+            // `sammler.leeren()`, kein Tap, keine Engine).
+            guard !abbruchAngefordert else {
+                throw AudioRecorderError.notRecording
             }
 
             _ = sammler.leeren()
@@ -165,13 +190,29 @@ public actor AVAudioEngineRecorder: AudioRecorder {
             zustand = .laeuft
         } catch {
             // Jeder Fehlerpfad oben lässt den Recorder wieder startbar zurück, statt
-            // dauerhaft in `.startet` verklemmt zu bleiben.
+            // dauerhaft in `.startet` verklemmt zu bleiben. `abbruchAngefordert` gehört
+            // ausschließlich zum gerade beendeten Versuch — zurücksetzen, sonst würde ein
+            // künftiger start() fälschlich als bereits abgebrochen gelten.
             zustand = .gestoppt
+            abbruchAngefordert = false
             throw error
         }
     }
 
     public func stop() async throws -> AudioRecording {
+        // `.startet`: der Startvorgang hängt noch am Berechtigungs-Gate, Tap und Engine
+        // existieren noch nicht (Important-Finding, Task 2 M4). Hier lässt sich nichts
+        // synchron abräumen — stattdessen nur den Abbruch markieren; `start()` prüft ihn,
+        // sobald das Gate sich löst, und bricht dann VOR jeder Hardware-Berührung ab (s. dort).
+        // Weiterhin `.notRecording`: Es ist bewusst dieselbe Fehlerantwort wie im schon vorher
+        // bestehenden Fall „gar nicht erst gestartet" — in beiden Fällen hat nie ein Tap
+        // existiert und wurde kein einziges Sample gesammelt, ein leeres `AudioRecording`
+        // vorzutäuschen wäre irreführend (es suggeriert eine erfolgreich beendete Aufnahme, die
+        // es nie gab). Der Aufrufer (Task 4) unterscheidet ohnehin nicht zwischen beiden Fällen.
+        guard zustand != .startet else {
+            abbruchAngefordert = true
+            throw AudioRecorderError.notRecording
+        }
         guard zustand == .laeuft else { throw AudioRecorderError.notRecording }
         zustand = .gestoppt
 

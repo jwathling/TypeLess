@@ -116,6 +116,21 @@ final class GatedPermissionCheck: @unchecked Sendable {
         lock.unlock()
         for k in wartende { k.resume(returning: ergebnis) }
     }
+
+    /// Löst nur die *aktuell* wartenden Aufrufe einmalig auf — anders als `oeffnen(mit:)` OHNE
+    /// das Tor dauerhaft zu öffnen. Ein späterer, neuer Aufruf von `pruefung()` hängt danach
+    /// wieder, bis er erneut aufgelöst wird. Damit lässt sich für aufeinanderfolgende
+    /// `start()`-Versuche je ein anderes Ergebnis erzwingen (s.
+    /// `stopWaehrendStartetBrichtDenStartvorgangAb`), ohne dass ein späterer Versuch aus
+    /// Versehen echte Hardware anfasst, weil das Tor noch von einem früheren Versuch offen
+    /// stünde.
+    func loeseAktuelleAuf(mit ergebnis: Bool) {
+        lock.lock()
+        let wartende = pending
+        pending = []
+        lock.unlock()
+        for k in wartende { k.resume(returning: ergebnis) }
+    }
 }
 
 @Test(.timeLimit(.minutes(1)))
@@ -153,8 +168,10 @@ func gleichzeitigeStartAufrufeGreifenNurEinmalAufDieBerechtigungZu() async throw
         try await erster.value
     }
     // Beide Tasks sind hier nachweislich durch — was der zweite Aufruf getan hat, steht damit
-    // endgültig fest, ohne feste Wartezeit.
-    try await zweiter.value
+    // endgültig fest, ohne feste Wartezeit. `try?` bewusst statt `try`: Bei einer Mutation soll
+    // hier die sorgfältig formulierte `totalCalls == 1`-Diagnose unten sichtbar werden, nicht
+    // ein technisches „Caught error: .microphoneDenied" aus diesem `await`.
+    _ = try? await zweiter.value
 
     #expect(
         gate.totalCalls == 1,
@@ -171,6 +188,102 @@ func gleichzeitigeStartAufrufeGreifenNurEinmalAufDieBerechtigungZu() async throw
         try await recorder.start()
     }
     #expect(gate.totalCalls == 2, "nach einem gescheiterten start() muss der Recorder wieder startbar sein")
+}
+
+// MARK: - Important-Finding (Review zu Task 2): stop() im Fenster .startet muss start() abbrechen
+
+@Test(.timeLimit(.minutes(1)))
+func stopWaehrendStartetBrichtDenStartvorgangAb() async throws {
+    // Important-Finding (Review zu Task 2): Kommt `stop()` genau im Fenster `.startet` an (Tap
+    // noch nicht installiert, Engine noch nicht gestartet), warf es bisher `.notRecording` —
+    // und `start()` lief danach unbeirrt weiter: installierte den Tap und startete die Engine,
+    // als sei nichts gewesen. Das Mikrofon blieb dadurch endlos offen (heißer
+    // Aufnahmezustand); der nächste `start()` tat nichts mehr (Zustand ja schon `.laeuft`), und
+    // der nächste `stop()` hätte die gesamte Zwischenzeit als Diktat ausgeliefert. Kein
+    // exotischer Fall: Er trifft genau den allerersten Diktatversuch — der Nutzer lässt die
+    // Taste los, während noch der macOS-Berechtigungsdialog hängt, und klickt erst danach
+    // „Erlauben".
+    //
+    // Berechtigung wird hier bewusst ERTEILT (nicht verweigert wie im Reentrancy-Test oben):
+    // Nur so lässt sich der eigentliche Fehler nachstellen — bei verweigerter Berechtigung
+    // bricht schon der bestehende Guard davor ab, ganz ohne den hier geprüften Abbruch, und die
+    // Mutationsprobe unten liefe dann nicht rot. Dass dabei in der KAPUTTEN Fassung echte
+    // Hardware angefasst würde (s. Mutationsprobe im Bericht), ist hier hingenommen — in der
+    // reparierten Fassung, die im Normalbetrieb läuft, bricht `start()` VOR jeder
+    // Hardware-Berührung ab, das Gate wird dafür extra einmalig (nicht dauerhaft) aufgelöst.
+    let gate = GatedPermissionCheck()
+    let recorder = AVAudioEngineRecorder(mikrofonPruefung: { await gate.pruefung() })
+
+    var iterator = gate.started.makeAsyncIterator()
+
+    let erster = Task { try await recorder.start() }
+    _ = await iterator.next()
+    // Ab hier hängt `start()` garantiert am Tor, und `zustand` ist garantiert `.startet` —
+    // gleiche Programmreihenfolge-Begründung wie im Reentrancy-Test oben: Die Reservierung
+    // steht im Programmtext strikt vor dem Aufruf von `mikrofonPruefung()`.
+
+    await #expect(throws: AudioRecorderError.notRecording) {
+        _ = try await recorder.stop()
+    }
+
+    // Berechtigung jetzt nachträglich erteilen — genau der reale Ablauf ("...klickt erst danach
+    // 'Erlauben'"). Einmalig aufgelöst (`loeseAktuelleAuf`, nicht `oeffnen`): Das Tor bleibt für
+    // künftige Aufrufe geschlossen, ein zweiter Versuch unten hängt also erneut, statt
+    // versehentlich ebenfalls auf echte Hardware durchzulaufen.
+    gate.loeseAktuelleAuf(mit: true)
+
+    // Der Startvorgang muss sauber abbrechen — NICHT als Erfolg durchlaufen (das wäre ein
+    // offenes Mikrofon) und nicht mit einem anderen Fehler aus der Hardware-Initialisierung
+    // scheitern (das wäre ein Hinweis, dass der Abbruch zu spät oder gar nicht geprüft wurde).
+    // `.notRecording` ist dabei ausschließlich der Fehler des Abbruch-Guards direkt nach dem
+    // Gate (s. `start()`) — jeder andere Fehlerwert würde belegen, dass die Ausführung daran
+    // vorbeigelaufen und mindestens bis zur Formatverhandlung vorgedrungen ist.
+    //
+    // Bewusst KEIN `#expect(throws:)` hier, sondern manuelles do/catch mit sofortigem `return`
+    // im Fehlerfall: Bleibt der Abbruch aus, ist der Recorder ab hier tatsächlich `.laeuft` (auf
+    // echter Hardware) — ein zweiter `start()`-Versuch würde dann beim obersten Guard sofort
+    // (und stillschweigend) zurückkehren, OHNE je wieder `mikrofonPruefung()` zu erreichen. Der
+    // Wartepunkt `iterator.next()` unten bekäme dafür nie ein Signal und der Test bliebe bis zum
+    // `.timeLimit` hängen — genau die Falle, vor der der Auftrag warnt. Der frühe `return` hält
+    // den Test in diesem Fall schnell UND rot, statt hängend.
+    do {
+        try await erster.value
+        Issue.record(
+            """
+            start() hätte nach dem Abbruch mit .notRecording scheitern müssen, lief aber \
+            erfolgreich durch — das Mikrofon ist jetzt vermutlich offen (echte Hardware \
+            angefasst). Breche hier ab, statt in die Restartbarkeits-Prüfung weiterzulaufen, \
+            die sonst am nicht mehr erreichbaren Gate hängen bliebe.
+            """
+        )
+        return
+    } catch AudioRecorderError.notRecording {
+        // Erwartet — weiter zur Restartbarkeits-Prüfung unten.
+    } catch {
+        Issue.record(
+            "start() scheiterte nach dem Abbruch mit \(error) statt mit .notRecording — Abbruch griff nicht an der erwarteten Stelle"
+        )
+        return
+    }
+
+    // Wieder sauber startbar: Ein zweiter Versuch muss die Berechtigungsprüfung erneut
+    // erreichen (`totalCalls` steigt) und darf NICHT sofort wieder mit `.notRecording`
+    // scheitern — das würde einen liegen gebliebenen Abbruch-Zustand verraten
+    // (`abbruchAngefordert` nicht zurückgesetzt). Berechtigung diesmal verweigern, damit auch
+    // dieser zweite Versuch garantiert keine echte Hardware anfasst. Der obige frühe `return`
+    // stellt sicher, dass wir nur hier ankommen, wenn der erste Abbruch nachweislich funktioniert
+    // hat — `zustand` ist also garantiert `.gestoppt`, und dieser Wartepunkt kann nicht hängen.
+    let zweiter = Task { try await recorder.start() }
+    _ = await iterator.next()
+    gate.loeseAktuelleAuf(mit: false)
+
+    await #expect(throws: AudioRecorderError.microphoneDenied) {
+        try await zweiter.value
+    }
+    #expect(
+        gate.totalCalls == 2,
+        "der Recorder muss nach dem Abbruch wieder normal startbar sein und die Prüfung erneut erreichen"
+    )
 }
 
 // MARK: - Review-Finding 3: Umrechnungsfehler dürfen nicht stillschweigend verschwinden
