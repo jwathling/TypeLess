@@ -11,7 +11,7 @@ Native **SwiftUI-Shell** (Hotkey, Audio, Overlay, Text-Einfügen) + **Python-MLX
 (STT + LLM), verbunden über einen lokalen **Unix-Domain-Socket** (kein TCP).
 
 ```
-apps/macos/   # SwiftUI-App: Hotkey, Audio, Overlay, Einfügen, Settings   (M3 fertig, nur macOS)
+apps/macos/   # SwiftUI-App: Hotkey, Audio, Overlay, Einfügen, Settings   (M4 fertig, nur macOS)
 engine/       # Python-Sidecar: STT + LLM + Wörterbuch + Pipeline          (M1 fertig)
 ```
 
@@ -23,11 +23,21 @@ Sources/TypeLessCore/     # Bibliothek ohne jede UI (kein SwiftUI-/AppKit-UI-Imp
   Sidecar/                # HTTPUnixTransport, SidecarClient, SidecarLifecycle (UDS zur Engine)
   Permissions/             # PermissionsService (Mikrofon/Bedienungshilfen/Eingabeüberwachung)
   Settings/                 # SettingsStore (engineDirectory/socketPath/uvPath, UserDefaults)
+  Audio/                    # AudioResampler (→16 kHz mono), SilenceDetector, AudioRecorder /
+                          # AVAudioEngineRecorder (echte Aufnahme)
+  Hotkey/                   # HotkeyMonitor / FnKeyMonitor — CGEventTap auf die Fn-Taste,
+                          # .listenOnly (verschluckt nichts), erkennt Emoji-Picker-Konflikt
+  Dictation/                # Pasteboard-Protokoll, DictationCoordinator — führt Hotkey,
+                          # Aufnahme, Engine und Zwischenablage zusammen (SessionState)
   AppState.swift            # @MainActor @Observable Zustandsautomat — das Bindeglied zur UI
-Sources/TypeLess/          # Dünne SwiftUI-Hülle (MenuBarExtra) — zeigt nur an, was AppState
-                          # sagt, enthält selbst keine Logik. TypeLessApp.swift (Komposition +
-                          # App-Delegate für Start/Beenden), MenuContent.swift (Menüinhalt).
-Tests/TypeLessCoreTests/  # 43 Tests (Swift Testing), reine Mocks/Fakes — kein echter Sidecar
+                          # (Engine-Achse, EngineState; getrennt von SessionState)
+Sources/TypeLess/          # Dünne SwiftUI-Hülle (MenuBarExtra) — zeigt nur an, was AppState und
+                          # DictationCoordinator sagen, enthält selbst keine Logik.
+                          # TypeLessApp.swift (Komposition + App-Delegate für Start/Beenden),
+                          # MenuContent.swift (Menüinhalt, beide Zustandsachsen),
+                          # SystemPasteboard.swift (NSPasteboard — AppKit bleibt hier, nicht in
+                          # TypeLessCore).
+Tests/TypeLessCoreTests/  # 80 Tests (Swift Testing), reine Mocks/Fakes — kein echter Sidecar
                           # nötig.
 ```
 
@@ -88,7 +98,7 @@ Persönliches Wörterbuch (deterministisch, vor dem LLM): JSON unter
 
 ```bash
 cd apps/macos
-swift build && swift test        # 43 Tests (Swift Testing), reine Mocks — kein Sidecar nötig
+swift build && swift test        # 80 Tests (Swift Testing), reine Mocks — kein Sidecar nötig
 
 bash scripts/build-app.sh        # baut TypeLess.app aus dem Repo-Root (relativer Pfad ab dort)
 open apps/macos/TypeLess.app
@@ -104,7 +114,18 @@ erst in M8.
 Die App startet den Sidecar selbst (spekulativ übernimmt sie eine bereits laufende Instanz statt
 eine zweite zu spawnen) und beendet einen selbst gestarteten Sidecar beim Beenden wieder mit —
 egal ob über den Menü-Button, Cmd+Q oder „Beenden“ im Dock (`applicationShouldTerminate` in
-`TypeLessApp.swift` fängt **jeden** dieser Wege ab, s. Kommentar dort).
+`TypeLessApp.swift` fängt **jeden** dieser Wege ab, s. Kommentar dort). Beim Beenden läuft dort
+erst `dictation.stop()` (ein fertig gesprochenes, noch laufendes Diktat wird zu Ende verarbeitet),
+danach erst `state.shutdown()` — sonst wird der Engine unter einer noch laufenden Verarbeitung der
+Boden weggezogen.
+
+**Diktieren (ab M4):** **Fn halten**, sprechen, **loslassen** — der bereinigte/verfeinerte Text
+landet in der **Zwischenablage** (⌘V zum Einfügen; automatisches Einfügen an der Cursorposition
+kommt erst in M5). Bewusste Entscheidung des Anwenders: **kein Overlay und keine Töne** — das
+Menüleisten-Symbol ist die einzige Rückmeldung. Voraussetzung: Systemeinstellungen → Tastatur →
+„Beim Drücken der 🌐-Taste“ → „Keine Aktion“ (steht das auf Emoji-Picker/Eingabequelle/
+Systemdiktat, poppt bei jedem Diktat der Emoji-Picker auf — die App weist im Menü darauf hin,
+ändert die Einstellung aber nicht selbst).
 
 ## Aktueller Stand
 
@@ -135,8 +156,22 @@ egal ob über den Menü-Button, Cmd+Q oder „Beenden“ im Dock (`applicationSh
   Fehlerfall bei fehlendem Engine-Verzeichnis — je über Prozesstabelle und Menü-Text belegt).
   Beenden über Menü-Button, Cmd+Q **und** Dock laufen alle durch denselben
   `applicationShouldTerminate`-Pfad — kein verwaister Sidecar.
-- [ ] **M4** Audio+Hotkey+Overlay · **M5** Einfügen · **M6** Modi-Umschalter · **M7**
-  Settings-UI · **M8** Polish/Packaging.
+- [x] **M4** — Audio, Hotkey, Diktat-Koordinator: `Sources/TypeLessCore/Audio/`
+  (`AudioResampler` auf 16 kHz mono, `SilenceDetector`, `AudioRecorder`/`AVAudioEngineRecorder`
+  — fragt Mikrofonzugriff **vor** dem Start ab), `Hotkey/` (`HotkeyMonitor`/`FnKeyMonitor` — ein
+  **mitlesender** `CGEventTap` auf die Fn-Taste, verschluckt nichts, Fn-Kombinationen bleiben
+  unverändert; erkennt per `fnKeyOpensEmojiPicker()`, ob macOS die Taste selbst belegt),
+  `Dictation/` (`Pasteboard`-Protokoll, `DictationCoordinator` als eigener `SessionState`
+  — **getrennt** von `EngineState`, Diktat hat im Menü Vorrang). Text landet nach Fn-Loslassen in
+  der Zwischenablage; kein Overlay, keine Töne (Entscheidung des Anwenders — die Latenz von
+  ~6 s laut M1-Messwerten bleibt bis zur Optimierung in M8 unverdeckt). `Sources/TypeLess/
+  SystemPasteboard.swift` bringt die echte `NSPasteboard`-Umsetzung in die App-Schicht, ohne
+  AppKit in `TypeLessCore` zu ziehen. 80 Tests grün, **gegen echte Hardware verifiziert**
+  (Selbststart der Engine + Hotkey-Installation über das echte, ad-hoc signierte Bundle,
+  Fehlerfall bei fehlender Engine ohne Absturz, sauberes Beenden ohne verwaisten Sidecar —
+  jeweils über Prozesstabelle und Menütext belegt; das eigentliche Diktat mit echter Sprache ist
+  Handprobe).
+- [ ] **M5** Einfügen · **M6** Modi-Umschalter · **M7** Settings-UI · **M8** Polish/Packaging.
 
 ## Messwerte (M1, Apple Silicon, 16 GB)
 
