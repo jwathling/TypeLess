@@ -73,6 +73,14 @@ struct MenuContent: View {
 
     /// Der Diktat-Zustand hat Vorrang: Während der Aufnahme oder Verarbeitung interessiert die
     /// Engine nicht — das sähe der Nutzer ohnehin nur als irreführende Ablenkung.
+    ///
+    /// M3 (Abschluss-Review M5): Bei fehlender Eingabeüberwachung sagte es die Statuszeile, bei
+    /// fehlenden Bedienungshilfen nur der Warnblock darunter — die Statuszeile behauptete weiter
+    /// „Bereit — Fn halten zum Diktieren". Keine Lüge, aber inkonsistent zur Schwesterregel.
+    ///
+    /// Rangfolge, wenn BEIDE Rechte fehlen: Die Eingabeüberwachung geht vor. Ohne sie wirkt der
+    /// Hotkey gar nicht — dann ist es müßig, vor dem Zustellweg zu warnen, den man ohnehin nie
+    /// erreicht.
     private var statusText: String {
         switch dictation.session {
         case .recording: "🔴 Nimmt auf …"
@@ -84,6 +92,10 @@ struct MenuContent: View {
             switch state.engine {
             case .ready where state.hotkeyBrauchtEingabeueberwachung:
                 "⚠ Engine bereit, aber Fn wirkt nicht (s. unten)"
+            // Kein Ausfall — Diktieren geht, nur der letzte Schritt ist ein anderer: Der Text
+            // landet in der Zwischenablage statt direkt an der Cursorposition.
+            case .ready where state.einfuegenBrauchtBedienungshilfen:
+                "⚠ Bereit — Text landet aber nur in der Zwischenablage (⌘V)"
             case .ready: "Bereit — Fn halten zum Diktieren"
             case .starting: "Engine startet …"
             case .stopped: "Engine: gestoppt"
