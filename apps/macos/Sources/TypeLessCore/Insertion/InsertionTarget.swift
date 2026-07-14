@@ -1,5 +1,7 @@
 import AppKit
 @preconcurrency import ApplicationServices
+// Nur wegen `IsSecureEventInputEnabled()` (HIToolbox) — kein UI-Import.
+@preconcurrency import Carbon
 import Foundation
 
 /// Was hat gerade den Fokus? Entscheidet, ob TypeLess dort hineintippen darf.
@@ -19,13 +21,16 @@ public enum Fokusziel: Sendable, Equatable {
     case passwortfeld
     /// Irgendetwas anderes hat den Fokus (Liste, Knopf, Leinwand) — oder gar nichts.
     case keinTextfeld
-    /// Die Bedienungshilfen fehlen: TypeLess kann es schlicht **nicht wissen**.
+    /// TypeLess kann es schlicht **nicht wissen** — entweder fehlen die Bedienungshilfen, oder
+    /// **Secure Event Input** ist aktiv (dann würde ein Tippen zwar erlaubt aussehen, aber
+    /// wirkungslos verpuffen, s. ``AXInsertionTarget/fokusziel()``).
     ///
     /// Bewusst ein eigener Fall und **nicht** mit ``keinTextfeld`` zusammengelegt: Beide führen
     /// zwar zum selben Verhalten (Zwischenablage statt tippen), aber sie bedeuten Verschiedenes.
     /// `keinTextfeld` ist eine Aussage über die Welt, `unbekannt` eine über TypeLess. Nur so
-    /// kann das Menü dem Anwender sagen, dass ein RECHT fehlt — statt ihn glauben zu lassen, er
-    /// habe nicht ins richtige Feld geklickt.
+    /// kann das Menü dem Anwender sagen, dass es an den Umständen auf TypeLess' Seite liegt
+    /// (fehlendes Recht oder Secure Event Input) — statt ihn glauben zu lassen, er habe nicht ins
+    /// richtige Feld geklickt.
     case unbekannt
 }
 
@@ -61,8 +66,17 @@ public struct AXInsertionTarget: InsertionTarget {
     /// Mit dieser Naht ist die Regel unabhängig vom Zustand der Maschine beweisbar.
     private let istVertrauenswuerdig: @Sendable () -> Bool
 
+    /// Ob **Secure Event Input** gerade aktiv ist (C1, Review zu Task 4, Critical).
+    ///
+    /// Aus demselben Grund injizierbar wie ``istVertrauenswuerdig``: Der Zustand hängt daran, was
+    /// auf der Maschine gerade im Vordergrund steht (Terminal mit „Sichere Tastatureingabe",
+    /// 1Password u. Ä.) — ein fester `IsSecureEventInputEnabled()` wäre im Testlauf praktisch
+    /// immer `false` und die Regel damit nicht prüfbar.
+    private let sichereEingabeAktiv: @Sendable () -> Bool
+
     public init() {
         istVertrauenswuerdig = { AXIsProcessTrusted() }
+        sichereEingabeAktiv = { IsSecureEventInputEnabled() }
     }
 
     /// **Nur für Tests** — bewusst NICHT `public`: Wäre dieser Init von außerhalb des Moduls
@@ -71,8 +85,10 @@ public struct AXInsertionTarget: InsertionTarget {
     /// und damit die Sicherheitsprüfung im Produktivbetrieb aushebeln — kein Test würde das je
     /// bemerken, weil er denselben Konstruktor unauffällig weiterbenutzte. Gleiche Bauart wie
     /// `AVAudioEngineRecorder.init(mikrofonPruefung:)`, aus demselben Grund.
-    init(istVertrauenswuerdig: @escaping @Sendable () -> Bool) {
+    init(istVertrauenswuerdig: @escaping @Sendable () -> Bool,
+         sichereEingabeAktiv: @escaping @Sendable () -> Bool = { IsSecureEventInputEnabled() }) {
         self.istVertrauenswuerdig = istVertrauenswuerdig
+        self.sichereEingabeAktiv = sichereEingabeAktiv
     }
 
     public func vordersteApp() -> pid_t? {
@@ -81,6 +97,21 @@ public struct AXInsertionTarget: InsertionTarget {
     }
 
     public func fokusziel() -> Fokusziel {
+        // C1 (Review zu Task 4, Critical): **VOR allen anderen Prüfungen.** Ist Secure Event Input
+        // aktiv (Terminal → Shell → „Sichere Tastatureingabe", 1Password u. Ä., solange ihr
+        // Fenster vorne ist), verwirft macOS synthetische Tastatur-Ereignisse fremder Prozesse —
+        // **unabhängig von den Bedienungshilfen**. Ohne diese Prüfung sähe hier alles in bester
+        // Ordnung aus: App stimmt, `AXIsProcessTrusted()` erteilt, fokussiert ist ein setzbares
+        // `AXTextArea` → `.beschreibbaresTextfeld`. Der Koordinator tippte, `CGEventPost` meldet
+        // nichts zurück (s. ``TextInserter``), das Diktat käme nie an — und weil das Tippen als
+        // Erfolg gälte, bliebe auch die Zwischenablage unangetastet: Das Diktat wäre spurlos weg,
+        // bei zufriedener Anzeige. Genau das schließt M5 aus. `.unbekannt` (nicht `.keinTextfeld`)
+        // ist hier richtig: Es ist eine Aussage über TypeLess, nicht über das Feld — und es führt
+        // auf den bereits gebauten Ausweichweg (Zwischenablage).
+        //
+        // Der Aufruf braucht kein Sonderrecht.
+        guard !sichereEingabeAktiv() else { return .unbekannt }
+
         // Ohne Recht liefert AX gar nichts Verwertbares. Das MUSS als `.unbekannt` heraus und
         // darf niemals als "kein Textfeld" durchgehen — der Unterschied entscheidet darüber, was
         // das Menü dem Anwender erzählt.

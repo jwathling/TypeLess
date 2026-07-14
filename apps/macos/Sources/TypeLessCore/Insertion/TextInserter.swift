@@ -16,17 +16,25 @@ public enum TextInserterError: Error, Equatable {
 /// **Was dieser Typ NICHT kann — und warum der Aufrufer vorher prüfen MUSS:**
 ///
 /// `CGEventPost` ist in Apples Header als `void` deklariert: kein Rückgabewert, kein Fehlerkanal.
-/// Fehlen die Bedienungshilfen (nicht erteilt, oder zur Laufzeit entzogen), verpufft das Posten
-/// **wirkungslos** — kein Zeichen erscheint, und `insert()` kehrt trotzdem **ohne Fehler** zurück.
-/// Ein `throw` aus `insert()` bedeutet also „das Ereignis ließ sich nicht **erzeugen**"; es ist
-/// **keine** Bestätigung, dass ein nicht-werfender Aufruf tatsächlich angekommen ist. Diese
-/// Bestätigung gibt es auf dieser Schnittstelle schlicht nicht.
+/// Das Posten kann aus **mindestens zwei** Gründen wirkungslos verpuffen — es fehlen die
+/// Bedienungshilfen (nicht erteilt, oder zur Laufzeit entzogen), **oder** Secure Event Input ist
+/// aktiv (dann verwirft macOS synthetische Tastatur-Ereignisse fremder Prozesse, ganz unabhängig
+/// von den Bedienungshilfen). In beiden Fällen erscheint kein Zeichen, und `insert()` kehrt
+/// trotzdem **ohne Fehler** zurück. Ein `throw` aus `insert()` bedeutet also „das Ereignis ließ
+/// sich nicht **erzeugen**"; es ist **keine** Bestätigung, dass ein nicht-werfender Aufruf
+/// tatsächlich angekommen ist. Diese Bestätigung gibt es auf dieser Schnittstelle schlicht nicht.
 ///
 /// Der Schutz davor liegt deshalb **außerhalb** dieses Typs: Der Aufrufer darf `insert()` nur
 /// aufrufen, wenn ``InsertionTarget/fokusziel()`` ein `.beschreibbaresTextfeld` gemeldet hat —
-/// was ohne erteilte Bedienungshilfen nie passiert (dort kommt dann `.unbekannt` heraus). Diese
+/// was weder ohne erteilte Bedienungshilfen noch bei aktivem Secure Event Input passiert (in
+/// beiden Fällen kommt `.unbekannt` heraus, s. ``AXInsertionTarget/fokusziel()``). Diese
 /// Vorab-Prüfung ist **Pflicht, nicht Kür**: Ohne sie tippt TypeLess ins Leere und das Diktat ist
 /// spurlos weg — genau das, was M5 ausschließen soll.
+///
+/// **Ehrlich benannt:** Damit sind die *bekannten* Gründe abgedeckt, nicht bewiesenermaßen alle.
+/// Eine Zustellbestätigung gibt es auf dieser Ebene nicht — sie ließe sich nur erkaufen, indem man
+/// den Inhalt des Zielfeldes läse, und das schließt das Datenschutz-Versprechen dieses Projekts
+/// aus (gleiche Abwägung wie bei ``Fokusziel/passwortfeld``).
 ///
 /// Als Protokoll, damit der ``DictationCoordinator`` testbar bleibt, ohne dass im Testlauf
 /// wirklich irgendwo Text erscheint.
