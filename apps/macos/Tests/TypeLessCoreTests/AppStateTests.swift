@@ -159,6 +159,7 @@ struct FakePermissions: PermissionsService {
     }
     func openSettings(for permission: Permission) {}
     @discardableResult func requestInputMonitoring() -> Bool { granted }
+    @discardableResult func requestAccessibility() -> Bool { granted }
 }
 
 /// Zählt mit, ob die Eingabeüberwachung wirklich ANGEFORDERT wurde — und beginnt so, wie es beim
@@ -168,6 +169,7 @@ final class ZaehlendePermissions: PermissionsService, @unchecked Sendable {
     private let lock = NSLock()
     private var erteilt = false
     private(set) var anfragen = 0
+    private(set) var axAnfragen = 0
 
     func status() -> PermissionStatus {
         lock.lock(); defer { lock.unlock() }
@@ -181,6 +183,14 @@ final class ZaehlendePermissions: PermissionsService, @unchecked Sendable {
     func requestInputMonitoring() -> Bool {
         lock.lock(); defer { lock.unlock() }
         anfragen += 1
+        erteilt = true
+        return true
+    }
+
+    @discardableResult
+    func requestAccessibility() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        axAnfragen += 1
         erteilt = true
         return true
     }
@@ -204,6 +214,7 @@ final class MutablePermissions: PermissionsService, @unchecked Sendable {
 
     func openSettings(for permission: Permission) {}
     @discardableResult func requestInputMonitoring() -> Bool { status().inputMonitoring }
+    @discardableResult func requestAccessibility() -> Bool { status().accessibility }
 }
 
 @MainActor
@@ -572,5 +583,28 @@ func eingabeueberwachungWirdAktivAngefordertUndNichtNurGeprueft() async throws {
 
     #expect(permissions.anfragen == 1, "das Recht muss ANGEFORDERT werden, nicht nur geprüft")
     #expect(!state.hotkeyBrauchtEingabeueberwachung,
+            "nach erteiltem Recht muss die Anzeige das sofort widerspiegeln")
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func bedienungshilfenWerdenAktivAngefordertUndNichtNurGeprueft() async throws {
+    // Dieselbe Falle wie bei der Eingabeüberwachung in M4: `CGEvent.post` braucht das Recht
+    // "Bedienungshilfen". Fehlt es, passiert beim Einfügen schlicht NICHTS — kein Fehler, kein
+    // Hinweis. Wird das Recht nur GEPRÜFT und nie ANGEFORDERT, fragt macOS den Anwender nie.
+    let permissions = ZaehlendePermissions()
+    let state = AppState(lifecycle: FakeLifecycle(.success(.adopted)),
+                         client: StaticClient(.success(health("ready"))),
+                         permissions: permissions,
+                         pollIntervalStarting: .milliseconds(10),
+                         pollIntervalReady: .milliseconds(10))
+
+    #expect(state.einfuegenBrauchtBedienungshilfen,
+            "vor der Anfrage fehlt das Recht — das Menü muss das sagen können")
+
+    state.requestAccessibility()
+
+    #expect(permissions.axAnfragen == 1, "das Recht muss ANGEFORDERT werden, nicht nur geprüft")
+    #expect(!state.einfuegenBrauchtBedienungshilfen,
             "nach erteiltem Recht muss die Anzeige das sofort widerspiegeln")
 }
