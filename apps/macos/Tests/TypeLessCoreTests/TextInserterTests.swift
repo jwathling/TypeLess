@@ -2,13 +2,19 @@ import Testing
 @testable import TypeLessCore
 
 @Test
-func leererTextWirdNichtGepostet() throws {
-    // Nichts zu tippen heißt: gar kein Ereignis erzeugen. Ein leeres Ereignis zu posten wäre ein
-    // sinnloser Tastendruck in einer fremden App.
-    let inserter = CGEventTextInserter()
+func leererTextErzeugtKeinEinzigesEreignis() throws {
+    // Nichts zu tippen heißt: gar kein Ereignis posten — ein leerer Tastendruck in einer fremden
+    // App wäre sinnlos.
+    //
+    // Geprüft wird das über `zerlege`, nicht über `insert`: Ein Test, der bloß `try insert("")`
+    // aufruft und sich freut, dass nichts wirft, beweist gar nichts — er bleibt auch dann grün,
+    // wenn man den `isEmpty`-Guard entfernt (vom Reviewer in M5/Task 3 nachgewiesen). Die Zahl
+    // der Ereignisse hängt allein an der Zahl der Häppchen; ist die null, wird nichts gepostet.
+    #expect(CGEventTextInserter.zerlege("").isEmpty,
+            "leerer Text darf zu KEINEM Häppchen führen — sonst würde ein leeres Ereignis gepostet")
 
-    // Darf nicht werfen und nichts tun.
-    try inserter.insert("")
+    // Und der Aufruf selbst darf nicht werfen.
+    try CGEventTextInserter().insert("")
 }
 
 @Test
