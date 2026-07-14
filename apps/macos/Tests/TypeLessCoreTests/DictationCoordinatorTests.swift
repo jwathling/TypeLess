@@ -235,6 +235,23 @@ func warteBis(_ bedingung: () -> Bool) async {
     }
 }
 
+/// Wie `warteBis`, aber für Bedingungen, die auf ECHTE Zeit warten müssen (C1, Review M4: der
+/// Aufnahme-Watchdog basiert auf `Task.sleep`) — reines `Task.yield()`-Pollen hat keine Garantie,
+/// in endlicher WALLTIME lange genug zu warten (10 000 Yields können, je nach Systemlast, in
+/// Mikrosekunden durch sein). Trotzdem keine EINZELNE feste Wartezeit: gepollt mit kurzen
+/// Intervallen bis zu einer echten Obergrenze — exakt dasselbe Muster wie
+/// `DictationCoordinator.warteAufVerarbeitungenMitZeitlimit` in der Produktion. Die Obergrenze
+/// hier ist reine Sicherheitsbremse (weit über jeder realistischen Wartezeit) — läuft sie ab,
+/// gibt die Funktion einfach auf (kein Hängenbleiben), und die nachfolgenden `#expect`s werden
+/// sichtbar rot statt den Test ewig zu blockieren.
+@MainActor
+func warteBisMitEchterZeit(obergrenze: Duration = .seconds(5), _ bedingung: () -> Bool) async {
+    let deadline = ContinuousClock.now.advanced(by: obergrenze)
+    while !bedingung(), ContinuousClock.now < deadline {
+        try? await Task.sleep(for: .milliseconds(2))
+    }
+}
+
 // MARK: - Tests
 
 @MainActor
@@ -675,4 +692,87 @@ func stopGibtBeiEinerHaengendenVerarbeitungNachDemZeitlimitAufOhneSieAbzubrechen
     #expect(coordinator.session == .idle, "stop() muss trotz hängender Verarbeitung zurückkehren")
     #expect(pasteboard.geschrieben.isEmpty,
            "stop() darf nach Ablauf des Zeitlimits nicht mehr auf das Ergebnis gewartet haben")
+}
+
+// MARK: - C1 (Review M4, Critical): verlorenes .released darf das Mikrofon nicht für immer offen lassen
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func verwaisteAufnahmeWirdVorNeustartVerworfen() async throws {
+    // C1 (Review M4, Critical): Schaltet macOS den CGEventTap kurz ab (`.tapDisabledByTimeout`,
+    // s. `FnKeyMonitor.handle`) und fällt GENAU das Loslassen in dieses Fenster, kommt nie ein
+    // `.released` an — `session` bleibt auf `.recording` hängen, während der Recorder
+    // tatsächlich noch aufnimmt. Hier nachgestellt durch zwei `.pressed` OHNE ein
+    // dazwischenliegendes `.released`: aus Sicht des Koordinators exakt dasselbe Bild wie ein
+    // verlorenes Ereignis. `handlePressed()` muss die verwaiste Aufnahme JETZT zuerst verwerfen,
+    // bevor es neu startet — sonst würde (auf dem echten Recorder) dieselbe Aufnahme unbemerkt
+    // weiterlaufen, und das spätere `stop()` läge die GESAMTE Zwischenzeit als Diktat vor.
+    //
+    // `FakeRecorder.start()` wirft jetzt `.alreadyRecording`, wenn es aufgerufen wird, während
+    // `laeuft == true` ist (bildet den Vertrag von `AVAudioEngineRecorder.start()` nach, s.
+    // dort) — OHNE den Fix in `handlePressed()` bricht der zweite Tastendruck deshalb mit
+    // `.failed(...)` ab, statt (wie mit Fix) eine frische Aufnahme zu starten. Das macht die
+    // Mutationsprobe beweiskräftig, ohne echte Hardware zu brauchen.
+    let hotkey = FakeHotkey()
+    let recorder = FakeRecorder(samples: sprache())
+    let pasteboard = SpyPasteboard()
+    let client = DictationClient(ergebnis: .success(ergebnis("zweite Aufnahme")))
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: recorder,
+                                      client: client, pasteboard: pasteboard)
+    await coordinator.start()
+
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    #expect(await recorder.startCount == 1)
+
+    // Das "verlorene" .released kommt hier nie an — stattdessen drückt der Nutzer erneut.
+    hotkey.send(.pressed)
+    hotkey.send(.released)
+    await warteBis {
+        if case .failed = coordinator.session { return true }
+        return coordinator.session == .idle
+    }
+
+    #expect(coordinator.session == .idle,
+           "die verwaiste Aufnahme muss verworfen und danach eine frische gestartet worden sein")
+    #expect(await recorder.startCount == 2, "nach dem Verwerfen muss sofort neu gestartet werden")
+    #expect(client.processCount == 1, "genau EINE Verarbeitung — die der frischen Aufnahme")
+    #expect(pasteboard.geschrieben == ["zweite Aufnahme"],
+           "nur die frische Aufnahme darf in der Zwischenablage landen")
+
+    await coordinator.stop()
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func wachhundBrichtEineNieLosgelasseneAufnahmeNachDerObergrenzeSelbsttaetigAb() async throws {
+    // C1 (Review M4, Critical): Ohne diesen Watchdog gibt es aus einem hängen gebliebenen
+    // `.recording` KEINEN Weg mehr zurück außer einem erneuten Tastendruck (s.
+    // `verwaisteAufnahmeWirdVorNeustartVerworfen`). Die Spec hatte dafür ursprünglich
+    // `case recording(since:)` vorgesehen — hier stattdessen ein injizierbares, für den Test
+    // winzig gehaltenes Zeitlimit, damit der Test nicht 120 echte Sekunden braucht.
+    let hotkey = FakeHotkey()
+    let recorder = FakeRecorder(samples: sprache())
+    let pasteboard = SpyPasteboard()
+    let client = DictationClient(ergebnis: .success(ergebnis("darf nicht kommen")))
+    let coordinator = DictationCoordinator(hotkey: hotkey, recorder: recorder, client: client,
+                                           pasteboard: pasteboard,
+                                           aufnahmeObergrenze: .milliseconds(30))
+    await coordinator.start()
+
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+
+    // Absichtlich KEIN .released — genau das Szenario, das den Watchdog braucht.
+    await warteBisMitEchterZeit {
+        if case .failed = coordinator.session { return true }
+        return false
+    }
+
+    #expect(coordinator.session == .failed("Aufnahme abgebrochen — Taste nicht losgelassen?"))
+    #expect(await recorder.laeuft == false, "das Mikrofon muss nach dem Abbruch wieder zu sein")
+    #expect(client.processCount == 0, "eine abgebrochene Aufnahme darf die Engine nie erreichen")
+    #expect(pasteboard.geschrieben.isEmpty, "die Zwischenablage darf nie überschrieben werden")
+
+    await coordinator.stop()
 }

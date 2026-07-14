@@ -23,6 +23,13 @@ actor FakeRecorder: AudioRecorder {
 
     func start() async throws {
         startCount += 1
+        // C1 (Review M4, Critical): Bildet denselben Vertrag nach, den `AVAudioEngineRecorder`
+        // jetzt einhält (s. dort) — ein `start()`, während bereits aufgenommen wird, darf NICHT
+        // still gelingen. Ohne diese Zeile könnte `DictationCoordinatorTests` einen fehlenden
+        // Verwerfen-vor-Neustart-Fix in `DictationCoordinator.handlePressed()` nicht bemerken:
+        // Die Attrappe würde den zweiten `start()` klaglos schlucken, obwohl real ein Datenleck
+        // entstünde (s. `verwaisteAufnahmeWirdVorNeustartVerworfen`).
+        guard !laeuft else { throw AudioRecorderError.alreadyRecording }
         if let fehlerBeimStart { throw fehlerBeimStart }
         laeuft = true
     }
