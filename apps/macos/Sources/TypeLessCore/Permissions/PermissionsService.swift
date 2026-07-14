@@ -63,11 +63,33 @@ public struct PermissionStatus: Sendable, Equatable {
     }
 }
 
-/// Liest den Ist-Zustand der Berechtigungen. Fragt **nichts** aktiv an — macOS zeigt seinen
-/// Dialog ohnehin erst beim ersten echten Zugriff. M3 zeigt nur an, was fehlt.
+/// Liest den Ist-Zustand der Berechtigungen — und fordert die **Eingabeüberwachung** aktiv an.
+///
+/// Die anderen beiden fordert TypeLess nicht selbst an: Das Mikrofon erfragt der `AudioRecorder`
+/// vor der ersten Aufnahme (`AVCaptureDevice.requestAccess`), die Bedienungshilfen braucht erst
+/// M5. Die Eingabeüberwachung ist der Sonderfall — s. `requestInputMonitoring()`.
 public protocol PermissionsService: Sendable {
     func status() -> PermissionStatus
     func openSettings(for permission: Permission)
+
+    /// Fordert die Eingabeüberwachung an — **muss beim Programmstart aufgerufen werden**.
+    ///
+    /// Ohne diesen Aufruf gibt es keinen Systemdialog und TypeLess erscheint unter Umständen
+    /// nicht einmal in der Liste unter Systemeinstellungen → Datenschutz → Eingabeüberwachung —
+    /// der Anwender hat dann gar keinen Schalter, den er umlegen könnte.
+    ///
+    /// Der eigentliche Grund, warum das nicht optional ist: Ein `CGEventTap` lässt sich auch
+    /// OHNE dieses Recht anlegen. `CGEvent.tapCreate` liefert brav einen Tap zurück, es gibt
+    /// keinen Fehler und keine Ausnahme — der Tap bekommt im Hintergrund nur nie ein Ereignis
+    /// zu sehen. Ist TypeLess dagegen gerade die **aktive** App (z. B. weil sein Menü offen
+    /// steht), sieht er die Tastendrücke sehr wohl, denn eine aktive App darf ihre eigenen
+    /// Ereignisse ohne Sonderrecht empfangen.
+    ///
+    /// Das ergibt das denkbar verwirrendste Fehlerbild, und es ist in der Handprobe zu M4 genau
+    /// so aufgetreten: „Diktieren geht nur, solange ich das Menü offen habe." Der Rückgabewert
+    /// sagt, ob das Recht (jetzt) da ist.
+    @discardableResult
+    func requestInputMonitoring() -> Bool
 }
 
 public struct SystemPermissionsService: PermissionsService {
@@ -82,5 +104,10 @@ public struct SystemPermissionsService: PermissionsService {
 
     public func openSettings(for permission: Permission) {
         NSWorkspace.shared.open(permission.settingsURL)
+    }
+
+    @discardableResult
+    public func requestInputMonitoring() -> Bool {
+        IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
     }
 }

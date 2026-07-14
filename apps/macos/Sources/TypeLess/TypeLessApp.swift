@@ -97,6 +97,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Hotkey steht damit sofort. Drückt jemand Fn, bevor die Engine warm ist, nimmt TypeLess
         // auf und meldet beim Loslassen einen sauberen Fehler (`SidecarError.notReady`) — die
         // Zwischenablage bleibt unangetastet.
+        // ZUERST, synchron: Ohne dieses Recht legt `CGEvent.tapCreate` zwar klaglos einen Tap an,
+        // der aber im Hintergrund nie ein Ereignis sieht — Fn wirkt dann NUR, solange TypeLess
+        // die aktive App ist (etwa bei offenem Menü). Kein Fehler, kein Hinweis, nichts.
+        // Erst der Aufruf hier bringt macOS dazu, zu fragen und TypeLess überhaupt in die Liste
+        // der Eingabeüberwachung aufzunehmen.
+        state.requestInputMonitoring()
+
         Task { await state.start() }
         Task { await dictation.start() }
     }
