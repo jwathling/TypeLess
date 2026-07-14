@@ -325,6 +325,34 @@ func loslassenVerarbeitetUndSchreibtInDieZwischenablage() async throws {
 
 @MainActor
 @Test(.timeLimit(.minutes(1)))
+func diktatWaehrendDieEngineNochAufwaermtErklaertSichVerstaendlich() async throws {
+    // Seit der Hotkey sofort beim Programmstart steht (und nicht mehr erst nach ~20 s hinter der
+    // aufwärmenden Engine hängt, s. `AppDelegate.applicationDidFinishLaunching`), ist das ein
+    // Fall, den der Anwender im Alltag WIRKLICH trifft: App gestartet, sofort Fn gedrückt.
+    // Der Rohgrund des Servers („starting“) sagt ihm nichts — die Meldung muss erklären, was zu
+    // tun ist. Und wie bei JEDEM Fehlschlag: die Zwischenablage bleibt unangetastet.
+    let hotkey = FakeHotkey()
+    let pasteboard = SpyPasteboard()
+    let client = DictationClient(ergebnis: .failure(.notReady("starting")))
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
+                                      client: client, pasteboard: pasteboard)
+    await coordinator.start()
+
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+    await warteBis { if case .failed = coordinator.session { true } else { false } }
+
+    #expect(coordinator.session == .failed("Engine wärmt noch auf — gleich nochmal versuchen"),
+            "der Rohgrund des Servers darf dem Anwender nicht vorgesetzt werden")
+    #expect(pasteboard.geschrieben.isEmpty,
+            "auch hier gilt: alter Inhalt der Zwischenablage schlägt Leere")
+
+    await coordinator.stop()
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
 func gescheiterterPreloadVerhindertDasDiktatNicht() async throws {
     // Der Preload ist reine Beschleunigung. /process lädt notfalls selbst nach.
     let hotkey = FakeHotkey()

@@ -471,7 +471,11 @@ public final class DictationCoordinator {
         switch error {
         case .unreachable: return "Engine nicht erreichbar"
         case .timedOut: return "Die Engine antwortet gerade nicht"
-        case let .notReady(grund): return grund
+        // Seit der Hotkey sofort steht (s. `AppDelegate.applicationDidFinishLaunching`), ist das
+        // ein Fall, den der Anwender im Alltag WIRKLICH sieht: kurz nach dem Programmstart Fn
+        // gedrückt, während die Engine noch aufwärmt. Der Rohgrund des Servers („starting“) sagt
+        // ihm nichts — hier gehört ein Satz hin, der erklärt, was zu tun ist.
+        case .notReady: return "Engine wärmt noch auf — gleich nochmal versuchen"
         case let .processingFailed(grund): return grund
         case let .badRequest(grund): return grund
         case .malformedResponse: return "Unverständliche Antwort der Engine"
