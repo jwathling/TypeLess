@@ -105,6 +105,12 @@ public final class DictationCoordinator {
         // `stopWaehrendHandlePressedNochInRecorderStartHaengtSchliesstDasMikrofonTrotzdem`). Mit
         // diesem `await` ist ein bereits angestoßenes `handlePressed()`/`handleReleased()`
         // garantiert durchgelaufen, BEVOR unten geprüft wird, ob noch eine Aufnahme offen ist.
+        //
+        // Dieses Warten hat bewusst KEINE Obergrenze — anders als das auf die Verarbeitungen
+        // weiter unten. Es kann nur in einem Fall überhaupt lange dauern: Der Nutzer beendet die
+        // App, während der macOS-Mikrofondialog offen steht (nur beim allerersten Diktat). Dann
+        // wartet das Beenden, bis er den Dialog beantwortet — unschön, aber deutlich harmloser
+        // als die Alternative: ein Mikrofon, das nach dem Beenden weiterläuft.
         await bisherigeHotkeyTask?.value
 
         // Eine noch laufende Aufnahme darf hier nicht einfach ignoriert werden: Ohne dieses
@@ -144,21 +150,11 @@ public final class DictationCoordinator {
             return
         }
 
-        // Geprüft und bewusst NICHT ergänzt (Finding 1, Review zu Task 4): eine zusätzliche
-        // `guard !Task.isCancelled`-Prüfung hier, die den Recorder bei stornierter Hotkey-Task
-        // sofort selbst wieder zumacht. Für die im Finding beschriebene Garantie — "nach
-        // `stop()` läuft kein Mikrofon mehr" — ist sie NICHT nötig: Das `await` oben in `stop()`
-        // deckt beide möglichen Verzahnungen bereits vollständig ab (ob `handlePressed()` VOR
-        // oder NACH dem `cancel()` in `stopHotkey()` aus dem Gate zurückkehrt, `stop()` sieht in
-        // jedem Fall den korrekten `session`-Wert, sobald es weiterläuft, weil es exakt darauf
-        // wartet). Eine zusätzliche Prüfung hier würde sogar aktiv schaden: Sie schlösse den
-        // Recorder unabhängig vom Fix in `stop()` und würde dadurch die Mutationsprobe zu diesem
-        // Finding verdecken (Test bliebe grün, selbst wenn das `await` in `stop()` versehentlich
-        // wieder entfernt würde). Ein echter Bedarf für eine Reaktion auf Stornierung bestünde
-        // nur bei einem ganz anderen, hier nicht vorliegenden Ablauf — einem erneuten `start()`,
-        // das eine noch hängende alte Hotkey-Task kommentarlos abschießt, ohne auf sie zu warten
-        // (`stopHotkey()` in `start()`); das ist kein Teil dieses Findings und hier nicht
-        // angefasst.
+        // Hier steht bewusst KEINE `guard !Task.isCancelled`-Prüfung: Für die Garantie „nach
+        // `stop()` läuft kein Mikrofon mehr" ist sie nicht nötig. Das `await` in `stop()` deckt
+        // beide möglichen Verzahnungen ab — ob `handlePressed()` vor oder nach dem `cancel()`
+        // zurückkehrt, `stop()` sieht in jedem Fall den endgültigen `session`-Wert, weil es
+        // genau darauf wartet.
 
         // Beschleunigung, kein Muss: Das Sprachmodell lädt, während der Nutzer noch spricht.
         // Scheitert das, lädt `/process` notfalls selbst nach — ein Diktat darf daran nie
