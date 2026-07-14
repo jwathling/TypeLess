@@ -84,10 +84,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard let state, let dictation else { return }
-        Task {
-            await state.start()
-            await dictation.start()
-        }
+        // BEIDE in EIGENEN Tasks — nacheinander wäre ein Fehler: `state.start()` kehrt erst
+        // zurück, wenn die Engine fertig aufgewärmt ist (~20 s, s. `SidecarLifecycle
+        // .waitForReady()`). Hing `dictation.start()` an dessen `await`, war der Fn-Hotkey in
+        // den ersten 20 s nach dem Programmstart schlicht nicht installiert — Fn tat nichts,
+        // ohne dass irgendetwas darauf hingewiesen hätte. (Handprobe M4: als „Diktat startet
+        // erst, wenn ich ins Menü klicke" aufgefallen — in Wahrheit hatte das Klicken nur
+        // lange genug gedauert.)
+        //
+        // Engine-Achse und Diktat-Achse sind bewusst getrennt (`EngineState` vs. `SessionState`);
+        // dieser Startpfad ist die Stelle, an der sie es auch beim Hochfahren sein müssen. Der
+        // Hotkey steht damit sofort. Drückt jemand Fn, bevor die Engine warm ist, nimmt TypeLess
+        // auf und meldet beim Loslassen einen sauberen Fehler (`SidecarError.notReady`) — die
+        // Zwischenablage bleibt unangetastet.
+        Task { await state.start() }
+        Task { await dictation.start() }
     }
 
     /// `.terminateLater` lässt der asynchronen Aufräumarbeit Zeit, ohne den Main-Thread zu

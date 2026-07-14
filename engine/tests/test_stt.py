@@ -64,3 +64,21 @@ def test_transcribe_passes_language_through(fake_backend: FakeMLXWhisper) -> Non
     MLXWhisperTranscriber().transcribe(audio, language="en")
 
     assert fake_backend.calls[0]["language"] == "en"
+
+
+def test_transcribe_disables_conditioning_on_previous_text(fake_backend: FakeMLXWhisper) -> None:
+    """Der Kontext des vorigen 30-s-Fensters darf NICHT ins nächste weitergereicht werden.
+
+    Whisper kippt bei Stille, Atmern und Hintergrundgeräuschen am Satzende gelegentlich in eine
+    Wiederholungsschleife (bekannter Defekt). Mit ``condition_on_previous_text=True`` (dem
+    Default!) sät ein einziges betroffenes Fenster die Schleife in alle folgenden — das ganze
+    Diktat endet dann in „beber beber beber …“. In der Handprobe zu M4 real passiert.
+
+    Dieser Test ist die Wache davor, dass jemand den Parameter wieder entfernt, weil er
+    „unnötig“ aussieht.
+    """
+    audio = AudioBuffer(samples=np.zeros(TARGET_SAMPLE_RATE, dtype=np.float32))
+
+    MLXWhisperTranscriber().transcribe(audio)
+
+    assert fake_backend.calls[0]["condition_on_previous_text"] is False
