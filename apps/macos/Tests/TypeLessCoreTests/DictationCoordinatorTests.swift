@@ -1339,27 +1339,65 @@ func jedesDiktatPruftSeinenEigenenGemerktenFokus() async throws {
     // Neu: Jedes Diktat merkt sich beim Fn-Druck SEINE Ziel-App und prüft beim Zustellen genau
     // diese. Hier: Das erste Diktat wird in App 42 gesprochen; danach wechselt der Anwender in
     // App 99 und diktiert dort erneut. Das erste Ergebnis darf NICHT in App 99 getippt werden.
+    //
+    // I1 (Review zu Task 4, Important): Dieser Test brauchte ZWEI Diktate — vorher drückte er nur
+    // einmal, wechselte die App und ließ los. Damit war er ein Duplikat von
+    // `appWechselWaehrendDerVerarbeitungVerhindertDasTippen`, und der eigentliche Unterschied
+    // ("EIGENER gemerkter Fokus" statt "Fokus der JÜNGSTEN Verarbeitung") blieb unsichtbar, weil es
+    // nur EINE Verarbeitung gab: Ersetzte man die Übergabe in `verarbeite` durch
+    // `zielApp: self?.zielAppBeimDruck ?? zielApp` — genau das, was ein späterer "Aufräum"-Refactor
+    // täte —, blieb alles grün. Erst mit einer zweiten, JÜNGEREN Verarbeitung (die
+    // `zielAppBeimDruck` auf 99 gesetzt hat) unterscheiden sich die beiden Ausdrücke: Der überholte
+    // Erste läge dann bei 99 == 99 und tippte in die FREMDE App. Torgesteuerter Client, damit beide
+    // Verarbeitungen wirklich gleichzeitig offen sind — Muster wie in
+    // `aeltereVerarbeitungUeberschreibtNichtDenZustandDerNochLaufendenJuengeren`.
     let hotkey = FakeHotkey()
     let pasteboard = SpyPasteboard()
     let inserter = SpyInserter()
     let target = FakeTarget(app: 42, ziel: .beschreibbaresTextfeld)
-    let client = DictationClient(ergebnis: .success(ergebnis("Erstes Diktat.")))
+    let client = GatedDictationClient()
     let coordinator = makeCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
                                       client: client, pasteboard: pasteboard,
                                       inserter: inserter, target: target)
     await coordinator.start()
 
-    // Erstes Diktat in App 42.
+    // Erstes Diktat in App 42 — die Verarbeitung (#1) startet und hängt am Tor.
     hotkey.send(.pressed)
     await warteBis { coordinator.session == .recording }
-    // Anwender wechselt die App, BEVOR das Ergebnis eintrifft.
-    target.wechsleApp(zu: 99)
     hotkey.send(.released)
-    await warteBis { coordinator.session == .inZwischenablage }
+    var iterator = client.processGestartet.makeAsyncIterator()
+    _ = await iterator.next()
+
+    // Der Anwender wechselt nach App 99 und diktiert DORT erneut, während #1 noch läuft. Damit
+    // steht `zielAppBeimDruck` jetzt auf 99 — der überholte Erste darf sich davon nicht
+    // beeindrucken lassen.
+    target.wechsleApp(zu: 99)
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+    _ = await iterator.next()
+
+    // Das ÜBERHOLTE erste Ergebnis zuerst auflösen: Es gehört nach App 42, der Anwender steht aber
+    // in App 99.
+    client.freigeben(mit: .success(ergebnis("Erstes Diktat.")))
+    // Synchronisationspunkt ohne feste Wartezeit, der unter BEIDEN Ausgängen greift (richtig:
+    // Zwischenablage; mutiert: getippt) — so kann dieser Test unter der Mutation nicht hängen,
+    // sondern wird sichtbar rot.
+    await warteBis { !pasteboard.geschrieben.isEmpty || !inserter.getippt.isEmpty }
 
     #expect(inserter.getippt.isEmpty,
-            "das Diktat aus App 42 darf niemals in App 99 getippt werden")
-    #expect(pasteboard.geschrieben == ["Erstes Diktat."])
+            "das Diktat aus App 42 darf niemals in App 99 getippt werden — auch nicht, weil die JÜNGERE Verarbeitung dort gedrückt wurde")
+    #expect(pasteboard.geschrieben == ["Erstes Diktat."],
+            "der überholte Text darf nicht verloren gehen — er landet in der Zwischenablage")
+
+    // Gegenprobe: Das ZWEITE Diktat gehört nach App 99, dort steht der Anwender — es wird direkt
+    // eingefügt. Das belegt, dass die Zwischenablage oben nicht aus einem anderen Grund kam.
+    client.freigeben(mit: .success(ergebnis("Zweites Diktat.")))
+    await warteBis { coordinator.session == .idle }
+
+    #expect(inserter.getippt == ["Zweites Diktat."],
+            "das zweite Diktat gehört in App 99 — dort steht der Anwender, dort wird getippt")
+    #expect(pasteboard.geschrieben == ["Erstes Diktat."], "sonst blieb sie unangetastet")
 
     await coordinator.stop()
 }
