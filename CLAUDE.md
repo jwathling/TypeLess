@@ -37,8 +37,9 @@ Sources/TypeLess/          # Dünne SwiftUI-Hülle (MenuBarExtra) — zeigt nur 
                           # MenuContent.swift (Menüinhalt, beide Zustandsachsen),
                           # SystemPasteboard.swift (NSPasteboard — AppKit bleibt hier, nicht in
                           # TypeLessCore).
-Tests/TypeLessCoreTests/  # 80 Tests (Swift Testing), reine Mocks/Fakes — kein echter Sidecar
-                          # nötig.
+Tests/TypeLessCoreTests/  # 93 Tests (Swift Testing), fast alle mit Mocks/Fakes — kein echter
+                          # Sidecar nötig. Zwei Proben fassen echte Audio-Hardware an und
+                          # überspringen sich ohne Mikrofonrecht selbst.
 ```
 
 Engine-Datenfluss:
@@ -98,7 +99,7 @@ Persönliches Wörterbuch (deterministisch, vor dem LLM): JSON unter
 
 ```bash
 cd apps/macos
-swift build && swift test        # 80 Tests (Swift Testing), reine Mocks — kein Sidecar nötig
+swift build && swift test        # 93 Tests (Swift Testing), Mocks — kein Sidecar nötig
 
 bash scripts/build-app.sh        # baut TypeLess.app aus dem Repo-Root (relativer Pfad ab dort)
 open apps/macos/TypeLess.app
@@ -166,11 +167,29 @@ Systemdiktat, poppt bei jedem Diktat der Emoji-Picker auf — die App weist im M
   der Zwischenablage; kein Overlay, keine Töne (Entscheidung des Anwenders — die Latenz von
   ~6 s laut M1-Messwerten bleibt bis zur Optimierung in M8 unverdeckt). `Sources/TypeLess/
   SystemPasteboard.swift` bringt die echte `NSPasteboard`-Umsetzung in die App-Schicht, ohne
-  AppKit in `TypeLessCore` zu ziehen. 80 Tests grün, **gegen echte Hardware verifiziert**
+  AppKit in `TypeLessCore` zu ziehen. 93 Tests grün, **gegen echte Hardware verifiziert**
   (Selbststart der Engine + Hotkey-Installation über das echte, ad-hoc signierte Bundle,
   Fehlerfall bei fehlender Engine ohne Absturz, sauberes Beenden ohne verwaisten Sidecar —
   jeweils über Prozesstabelle und Menütext belegt; das eigentliche Diktat mit echter Sprache ist
   Handprobe).
+  Vier Fallen, die das Abschluss-Review fand, sind zugemauert — jede mit Mutationsprobe:
+  1. **Verlorenes Fn-Loslassen** (macOS schaltet den Tap unter Last ab): Mikrofon blieb offen,
+     der nächste `stop()` lieferte *alles seit dem ersten Druck* — fremdes Audio an die Engine.
+     Jetzt: verwaiste Aufnahme wird beim nächsten Druck verworfen, ein Doppelstart im Recorder
+     **wirft** (statt still zu schlucken), Watchdog bricht nach `aufnahmeObergrenze` (120 s) ab.
+  2. **Fn als Modifier** (Fn+Pfeil, gehalten): nahm auf, Whisper halluzinierte, Zwischenablage
+     zerstört. Jetzt `KeyDownCounter` — `CGEventSource.counterForEventType` liefert eine reine
+     Ordnungszahl der Tastendrücke, **ohne je einen Keycode zu sehen**. Steigt sie zwischen Druck
+     und Loslassen, wird das Diktat kommentarlos verworfen. **Die Event-Maske des Taps bleibt
+     ausschließlich `.flagsChanged` — sie um `.keyDown` zu erweitern wäre ein Datenschutzbruch.**
+  3. **`AVAudioEngineConfigurationChange`** (AirPods verbinden mitten im Diktat) kürzte die
+     Aufnahme stillschweigend; wird jetzt gemeldet und die Aufnahme verworfen.
+  4. **„Hotkey inaktiv" war toter Code** (`start()` warf nie) — das Menü sagte „Bereit", während
+     der Hotkey tot war. Jetzt am **Ende des Streams** erkannt, unterschieden über
+     `Task.isCancelled` (nicht über ein Flag — das meldete beim Neustart einen Ausfall, den es
+     nicht gab).
+  In **allen** Fehlerfällen bleibt die **Zwischenablage unangetastet** (alter Inhalt schlägt
+  Leere) — s. Spec.
 - [ ] **M5** Einfügen · **M6** Modi-Umschalter · **M7** Settings-UI · **M8** Polish/Packaging.
 
 ## Messwerte (M1, Apple Silicon, 16 GB)
