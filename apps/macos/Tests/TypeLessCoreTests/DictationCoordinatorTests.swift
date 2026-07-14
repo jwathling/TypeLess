@@ -197,6 +197,25 @@ final class GatedDictationClient: SidecarClient, @unchecked Sendable {
     }
 }
 
+/// Steuerbarer Tastendruck-Zähler (I1, Review M4, Important) — bildet
+/// `CGEventSource.counterForEventType(.combinedSessionState, eventType: .keyDown)` nach, ohne
+/// echte Tastendrücke zu brauchen. Startet bewusst bei `0` und bleibt dort, bis der Test
+/// `druecke()` aufruft — ein REALER `SystemKeyDownCounter` als Default wäre hier gefährlich:
+/// Er zählt SYSTEMWEIT, nicht app-bezogen, tippt also z. B. auch die Terminal-Eingabe mit, in
+/// der `swift test` gerade läuft — Tests, die ihn nicht explizit steuern, würden dadurch
+/// nichtdeterministisch (Fn-als-Modifier-Erkennung würde scheinbar zufällig zuschlagen).
+final class FakeKeyDownCounter: KeyDownCounter, @unchecked Sendable {
+    private let lock = NSLock()
+    private var stand: UInt32 = 0
+
+    func aktuellerStand() -> UInt32 { lock.lock(); defer { lock.unlock() }; return stand }
+
+    /// Simuliert Tastendrücke, während Fn unten ist (Fn-als-Modifier, z. B. Fn+Pfeil).
+    func druecke(_ anzahl: UInt32 = 1) {
+        lock.lock(); stand += anzahl; lock.unlock()
+    }
+}
+
 func ergebnis(_ text: String, refined: Bool = true,
               fallbackReason: String? = nil) -> ProcessResult {
     ProcessResult(finalText: text, rawText: text, dictionaryText: text, mode: "diktat",
@@ -217,13 +236,19 @@ func stille(sekunden: Double = 1.0) -> [Float] {
 
 @MainActor
 func makeCoordinator(hotkey: HotkeyMonitor, recorder: AudioRecorder,
-                     client: SidecarClient, pasteboard: Pasteboard) -> DictationCoordinator {
+                     client: SidecarClient, pasteboard: Pasteboard,
+                     keyDownCounter: KeyDownCounter = FakeKeyDownCounter()) -> DictationCoordinator {
     // Auf Protokolltypen verbreitert (statt der konkreten Attrappen `FakeRecorder`/
     // `DictationClient`/`FakeHotkey`/`SpyPasteboard`): Damit lassen sich auch die torgesteuerten
     // Doubles `GatedRecorder`/`GatedDictationClient` (Findings 1–3, Review zu Task 4) hier
     // durchreichen, ohne einen zweiten, praktisch identischen Hilfsaufbau zu brauchen. Bestehende
     // Aufrufstellen sind unverändert gültig — jede konkrete Attrappe erfüllt ihr Protokoll.
-    DictationCoordinator(hotkey: hotkey, recorder: recorder, client: client, pasteboard: pasteboard)
+    //
+    // `keyDownCounter` Default `FakeKeyDownCounter()` (NICHT `SystemKeyDownCounter()`, s. dort):
+    // Ein feststehender Zähler, der nie von selbst steigt — bestehende Tests, die Fn nie als
+    // Modifier benutzen, bleiben damit unberührt von I1 (Review M4).
+    DictationCoordinator(hotkey: hotkey, recorder: recorder, client: client, pasteboard: pasteboard,
+                         keyDownCounter: keyDownCounter)
 }
 
 /// Wartet ohne feste Wartezeit, bis eine Bedingung eintritt.
@@ -669,7 +694,8 @@ func stopGibtBeiEinerHaengendenVerarbeitungNachDemZeitlimitAufOhneSieAbzubrechen
     let coordinator = DictationCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
                                            client: client, pasteboard: pasteboard,
                                            beendenZeitlimit: .milliseconds(50),
-                                           beendenPollIntervall: .milliseconds(5))
+                                           beendenPollIntervall: .milliseconds(5),
+                                           keyDownCounter: FakeKeyDownCounter())
     await coordinator.start()
 
     hotkey.send(.pressed)
@@ -757,7 +783,8 @@ func wachhundBrichtEineNieLosgelasseneAufnahmeNachDerObergrenzeSelbsttaetigAb() 
     let client = DictationClient(ergebnis: .success(ergebnis("darf nicht kommen")))
     let coordinator = DictationCoordinator(hotkey: hotkey, recorder: recorder, client: client,
                                            pasteboard: pasteboard,
-                                           aufnahmeObergrenze: .milliseconds(30))
+                                           aufnahmeObergrenze: .milliseconds(30),
+                                           keyDownCounter: FakeKeyDownCounter())
     await coordinator.start()
 
     hotkey.send(.pressed)
@@ -773,6 +800,65 @@ func wachhundBrichtEineNieLosgelasseneAufnahmeNachDerObergrenzeSelbsttaetigAb() 
     #expect(await recorder.laeuft == false, "das Mikrofon muss nach dem Abbruch wieder zu sein")
     #expect(client.processCount == 0, "eine abgebrochene Aufnahme darf die Engine nie erreichen")
     #expect(pasteboard.geschrieben.isEmpty, "die Zwischenablage darf nie überschrieben werden")
+
+    await coordinator.stop()
+}
+
+// MARK: - I1 (Review M4, Important): Fn als Modifier darf die Zwischenablage nicht überschreiben
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func fnAlsModifierWirdKommentarlosVerworfen() async throws {
+    // I1 (Review M4, Important): Hält der Nutzer Fn+Pfeil (oder eine andere Fn-Kombination)
+    // länger als die Diktat-Mindestdauer (beim mehrfachen Drücken normal), passieren beide Tore
+    // — die Mindestdauer ist überschritten, und das Stille-Gate greift nicht (Raumrauschen/
+    // Tastaturklappern liegen über -50 dBFS). Ohne den Zähler würde TypeLess also normal
+    // weiterverarbeiten, und Whisper würde aus dem Rauschen halluzinieren. Der Zähler erkennt
+    // den Tastendruck, OHNE zu wissen, welche Taste es war (s. `KeyDownCounter`).
+    let hotkey = FakeHotkey()
+    let recorder = FakeRecorder(samples: sprache())
+    let pasteboard = SpyPasteboard()
+    let client = DictationClient(ergebnis: .success(ergebnis("darf nicht kommen")))
+    let counter = FakeKeyDownCounter()
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: recorder, client: client,
+                                      pasteboard: pasteboard, keyDownCounter: counter)
+    await coordinator.start()
+
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    counter.druecke()   // Fn+Pfeil: mindestens eine Zeichentaste, während Fn unten ist
+    hotkey.send(.released)
+    await warteBis { coordinator.session == .idle }
+
+    #expect(client.processCount == 0, "Fn-als-Modifier darf die Engine gar nicht erst behelligen")
+    #expect(await recorder.laeuft == false, "das Mikrofon muss trotzdem sauber geschlossen werden")
+    #expect(pasteboard.geschrieben.isEmpty, "die Zwischenablage darf nie überschrieben werden")
+    #expect(coordinator.session == .idle, "kein Fehler — kommentarlos verworfen")
+
+    await coordinator.stop()
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func normalesDiktatBleibtUnberuehrtWennDerZaehlerWaehrendDerAufnahmeNichtSteigt() async throws {
+    // Regressionsschutz zu I1: Steigt der Zähler NICHT (der Normalfall — reines Diktieren ohne
+    // Zeichentasten), darf die neue Prüfung ein normales Diktat nicht beeinträchtigen.
+    let hotkey = FakeHotkey()
+    let pasteboard = SpyPasteboard()
+    let client = DictationClient(ergebnis: .success(ergebnis("normales Diktat")))
+    let counter = FakeKeyDownCounter()
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
+                                      client: client, pasteboard: pasteboard,
+                                      keyDownCounter: counter)
+    await coordinator.start()
+
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+    await warteBis { coordinator.session == .idle }
+
+    #expect(pasteboard.geschrieben == ["normales Diktat"])
+    #expect(client.processCount == 1)
 
     await coordinator.stop()
 }

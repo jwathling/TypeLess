@@ -66,6 +66,15 @@ public final class DictationCoordinator {
     /// s. `beendeAufnahmeWatchdog()`.
     private var aufnahmeWatchdog: Task<Void, Never>?
 
+    /// I1 (Review M4, Important): reiner Tastendruck-Zähler, s. ``KeyDownCounter`` für die
+    /// vollständige Begründung. Als Protokoll injiziert, damit Tests ihn ohne echte
+    /// Tastendrücke steuern können.
+    private let keyDownCounter: KeyDownCounter
+    /// Zählerstand beim letzten `.pressed` — der Vergleich in `handleReleased()` entscheidet,
+    /// ob der Nutzer zwischendurch eine Zeichentaste gedrückt hat (Fn als Modifier statt als
+    /// Diktier-Taste).
+    private var zaehlerBeimDruck: UInt32 = 0
+
     public init(hotkey: HotkeyMonitor,
                 recorder: AudioRecorder,
                 client: SidecarClient,
@@ -73,7 +82,8 @@ public final class DictationCoordinator {
                 minimumSampleCount: Int = 4_800,
                 beendenZeitlimit: Duration = .seconds(10),
                 beendenPollIntervall: Duration = .milliseconds(20),
-                aufnahmeObergrenze: Duration = .seconds(120)) {
+                aufnahmeObergrenze: Duration = .seconds(120),
+                keyDownCounter: KeyDownCounter = SystemKeyDownCounter()) {
         self.hotkey = hotkey
         self.recorder = recorder
         self.client = client
@@ -82,6 +92,7 @@ public final class DictationCoordinator {
         self.beendenZeitlimit = beendenZeitlimit
         self.beendenPollIntervall = beendenPollIntervall
         self.aufnahmeObergrenze = aufnahmeObergrenze
+        self.keyDownCounter = keyDownCounter
     }
 
     // MARK: - Lebenszyklus
@@ -198,6 +209,11 @@ public final class DictationCoordinator {
     // MARK: - Tastendruck
 
     private func handlePressed() async {
+        // I1 (Review M4, Important): Zählerstand so früh wie möglich lesen — so nah wie möglich
+        // am tatsächlichen Tastendruck. Der Vergleich mit dem Stand beim Loslassen entscheidet
+        // in `handleReleased()`, ob Fn als Modifier benutzt wurde (s. `KeyDownCounter`).
+        zaehlerBeimDruck = keyDownCounter.aktuellerStand()
+
         // C1 (Review M4, Critical): Verliert der Koordinator ein `.released` (macOS schaltet den
         // CGEventTap kurz ab — `FnKeyMonitor` macht ihn selbst wieder scharf, aber das Ereignis,
         // das GENAU in dieses Fenster fiel, ist unwiederbringlich weg), bleibt `session` auf
@@ -241,11 +257,31 @@ public final class DictationCoordinator {
         guard session == .recording else { return }
         beendeAufnahmeWatchdog()
 
+        // I1 (Review M4, Important): Zählerstand beim Loslassen lesen, VOR `recorder.stop()` —
+        // die Reihenfolge relativ zum `await` unten spielt keine Rolle (der Zähler zählt
+        // Tastendrücke, nicht Zeit), aber so bleibt die Lesung so nah wie möglich am
+        // tatsächlichen Loslassen.
+        let zaehlerBeimLoslassen = keyDownCounter.aktuellerStand()
+
         let recording: AudioRecording
         do {
             recording = try await recorder.stop()
         } catch {
             session = .failed("Aufnahme fehlgeschlagen: \(error)")
+            return
+        }
+
+        // I1 (Review M4, Important): Ist der Zähler seit dem Druck gestiegen, hat der Nutzer
+        // mindestens eine Zeichentaste gedrückt, während Fn unten war — Fn+Pfeil, Fn+Entf, …:
+        // Fn wurde als MODIFIER benutzt, nicht zum Diktieren. TypeLess nimmt dabei trotzdem auf
+        // (der Tap ist reines `.listenOnly` und verschluckt nichts), aber der Mitschnitt ist nur
+        // Rauschen/Tastaturklappern, aus dem Whisper halluziniert — bei einer Kombination, die
+        // länger als die Mindestdauer gehalten wird (beim mehrfachen Drücken normal), greift
+        // auch das Stille-Gate nicht (Raumrauschen/Tastaturklappern liegen über -50 dBFS).
+        // Kommentarlos verwerfen: kein Fehler, die Zwischenablage bleibt unangetastet, die
+        // Engine wird gar nicht erst bemüht.
+        guard zaehlerBeimLoslassen == zaehlerBeimDruck else {
+            session = .idle
             return
         }
 
