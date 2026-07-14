@@ -1,3 +1,4 @@
+import CoreGraphics
 import Testing
 @testable import TypeLessCore
 
@@ -88,6 +89,36 @@ func surrogatpaarWirdNichtZerschnitten() {
 
     #expect(haeppchen.allSatisfy { haeppchenIstGueltigesUTF16($0) },
             "kein Häppchen darf mitten durch ein Surrogatpaar geschnitten sein")
+}
+
+// MARK: - I1 (Abschluss-Review M5, Important): der Einfüger darf sich nicht selbst beim Tippen zuhören
+
+@Test
+func einfuegerPostetNichtAufDenHIDTapUndWirdDadurchNichtVomEigenenZaehlerMitgezaehlt() {
+    // Die Kopplung, die dieser Test bewacht (bis M5 unsichtbar und ungetestet):
+    // `SystemKeyDownCounter` zählt Tastendrücke; steigt der Zähler zwischen Fn-Druck und
+    // Fn-Loslassen, verwirft `DictationCoordinator` das Diktat KOMMENTARLOS („Fn war ein
+    // Modifier"). Seit M5 postet TypeLess selbst keyDown-Ereignisse. Würden die mitgezählt, wäre
+    // die Folge lautloser Datenverlust: Diktat 1 tippt, während Fn für Diktat 2 gehalten wird →
+    // Diktat 2 wird stumm weggeworfen, bei zufriedener Anzeige.
+    //
+    // GEMESSEN (Abschluss-Review M5, 20 synthetische keyDown, Differenz beider Zähler): Ob der
+    // Zähler mitzählt, hängt ALLEIN am Tap — nicht an der stateID der Quelle:
+    //   .cgAnnotatedSessionEventTap → .hidSystemState +0,  .combinedSessionState +0
+    //   .cgSessionEventTap          → .hidSystemState +0,  .combinedSessionState +20
+    //   .cghidEventTap              → .hidSystemState +20, .combinedSessionState +20
+    //
+    // Der Wechsel auf .cghidEventTap ist der übliche Reflex, wenn eine App annotierte
+    // Session-Ereignisse schluckt — genau dann kippt es. Dieser Test ist die Stolperdraht davor:
+    // Wer den Tap ändert, muss ZUERST die Fn-als-Modifier-Wache anders bauen.
+    #expect(CGEventTextInserter.postTap != .cghidEventTap,
+            """
+            .cghidEventTap injiziert auf HID-Ebene — SystemKeyDownCounter (.hidSystemState) zählt \
+            diese Ereignisse dann mit und verwirft ein gleichzeitig gehaltenes Diktat als \
+            „Fn als Modifier". Erst die Wache umbauen, dann den Tap wechseln.
+            """)
+    #expect(CGEventTextInserter.postTap == .cgAnnotatedSessionEventTap,
+            "der einzige gemessene Tap, bei dem KEIN Zähler die selbst geposteten Ereignisse sieht")
 }
 
 /// Prüft, dass ein Häppchen für sich allein gültiges UTF-16 ist — also mit keinem halben
