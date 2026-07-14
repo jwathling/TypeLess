@@ -14,6 +14,19 @@ struct MenuContent: View {
 
         Divider()
 
+        // Ohne Eingabeüberwachung sieht der Tastatur-Hook im Hintergrund NICHTS — Fn wirkt dann
+        // nur, solange TypeLess die aktive App ist (z. B. bei offenem Menü). Genau dieses
+        // Fehlerbild kostete in der Handprobe zu M4 einen Abend: „Diktieren geht nur, wenn ich
+        // das Menü offen habe." Deshalb steht es hier ganz oben und nicht bloß als eines von
+        // drei Häkchen weiter unten.
+        if state.hotkeyBrauchtEingabeueberwachung {
+            Text("⚠ Eingabeüberwachung fehlt — Fn wirkt nur bei offenem Menü")
+            Button("   → Eingabeüberwachung erlauben, dann TypeLess neu starten") {
+                state.openSettings(for: .inputMonitoring)
+            }
+            Divider()
+        }
+
         // Der Hotkey ist nutzlos, wenn macOS die Fn-Taste selbst belegt. Das sagen wir, statt
         // den Nutzer rätseln zu lassen, warum ständig Emojis aufpoppen.
         if FnKeyMonitor.fnKeyOpensEmojiPicker() {
@@ -56,6 +69,8 @@ struct MenuContent: View {
         case let .failed(grund): "Fehler: \(grund)"
         case .idle:
             switch state.engine {
+            case .ready where state.hotkeyBrauchtEingabeueberwachung:
+                "⚠ Engine bereit, aber Fn wirkt nicht (s. unten)"
             case .ready: "Bereit — Fn halten zum Diktieren"
             case .starting: "Engine startet …"
             case .stopped: "Engine: gestoppt"

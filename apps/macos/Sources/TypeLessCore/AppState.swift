@@ -75,6 +75,21 @@ public final class AppState {
         permissionsService.openSettings(for: permission)
     }
 
+    /// Fordert die Eingabeüberwachung an und aktualisiert sofort die Anzeige — beim Programmstart
+    /// aufzurufen. Ohne diesen Aufruf bleibt der globale Hotkey stumm, ohne dass irgendetwas
+    /// darauf hindeutet (ausführliche Begründung bei ``PermissionsService/requestInputMonitoring()``).
+    public func requestInputMonitoring() {
+        permissionsService.requestInputMonitoring()
+        refreshPermissions()
+    }
+
+    /// Der Hotkey kann ohne Eingabeüberwachung nicht im Hintergrund wirken — dann darf das Menü
+    /// **nicht** „Bereit" behaupten (das tat es und schickte den Anwender auf die Suche nach einem
+    /// Fehler, den es im Code gar nicht gab).
+    public var hotkeyBrauchtEingabeueberwachung: Bool {
+        !permissions.inputMonitoring
+    }
+
     // MARK: - Polling
 
     /// Fragt den Sidecar regelmäßig, wie es ihm geht — damit ein Wegsterben auffällt.
