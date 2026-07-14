@@ -14,7 +14,8 @@ public enum SessionState: Sendable, Equatable {
     ///
     /// **Kein Fehler.** Alles hat funktioniert; nur eine der vier Bedingungen fürs direkte
     /// Einfügen war nicht erfüllt (andere App im Vordergrund, kein Textfeld im Fokus,
-    /// Passwortfeld, oder die Bedienungshilfen fehlen). Ein eigener Fall und **nicht** `.failed`,
+    /// Passwortfeld, oder TypeLess kann es nicht wissen — fehlende Bedienungshilfen bzw. aktives
+    /// Secure Event Input). Ein eigener Fall und **nicht** `.failed`,
     /// weil das Menü sonst ein Warnzeichen zeigte, wo nichts schiefging — und weil der Anwender
     /// genau wissen soll, dass jetzt ⌘V dran ist.
     case inZwischenablage
@@ -475,10 +476,16 @@ public final class DictationCoordinator {
         }
 
         // Bedingungen 1, 3 und 4: Recht vorhanden, beschreibbares Textfeld, kein Passwortfeld.
-        // `.unbekannt` deckt den Fall "Bedienungshilfen fehlen" ab — dann wird NICHT geraten:
-        // `CGEventPost` meldet nichts zurück (s. ``TextInserter``), Getipptes käme also
-        // wirkungslos an, ohne dass es jemand merkte, und das Diktat wäre spurlos weg. Diese
-        // Vorab-Prüfung ist der EINZIGE Schutz davor — sie ist Pflicht, nicht Kür.
+        // `.unbekannt` deckt BEIDE Fälle ab, in denen TypeLess nicht wissen kann, ob getippter
+        // Text überhaupt ankäme: fehlende Bedienungshilfen UND aktives Secure Event Input
+        // (C1, Review zu Task 4 — s. ``AXInsertionTarget/fokusziel()``, dort steht die
+        // Begründung). Dann wird NICHT geraten: `CGEventPost` meldet nichts zurück
+        // (s. ``TextInserter``), Getipptes verpuffte also wirkungslos, ohne dass es jemand
+        // merkte, und das Diktat wäre spurlos weg — bei zufriedener Anzeige.
+        //
+        // Diese Vorab-Prüfung ist der einzige Schutz, den diese Ebene HAT — eine Bestätigung, dass
+        // Getipptes angekommen ist, gibt es auf der CGEvent-Schnittstelle nicht (s. ``TextInserter``).
+        // Sie deckt die bekannten Gründe fürs Verpuffen ab, nicht beweisbar alle: Pflicht, nicht Kür.
         guard target.fokusziel() == .beschreibbaresTextfeld else {
             pasteboard.write(text)
             return .inZwischenablage
