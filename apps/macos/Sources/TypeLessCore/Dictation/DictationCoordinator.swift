@@ -358,14 +358,24 @@ public final class DictationCoordinator {
 
         // `pasteboard` bewusst STARK gefangen, `self` dagegen SCHWACH (Finding 4, Review zu
         // Task 4, Minor — sonst leicht als Versehen "korrigiert"): Der Koordinator kann
-        // verschwinden, während diese Verarbeitung noch läuft — spätestens beim Beenden der App,
-        // wenn `stop()` nach `beendenZeitlimit` aufgibt, ohne diese Task abzubrechen (s. dort).
-        // Das Diktat soll TROTZDEM ankommen — unverhandelbar: ein Diktat darf nie verloren gehen
-        // —, deshalb muss `pasteboard` unabhängig vom Koordinator am Leben bleiben. `self`
-        // dagegen schwach: `session` hat ohne einen noch existierenden Koordinator keinen Sinn
-        // mehr (niemand liest ihn mehr) — ihn stark zu fangen würde den Koordinator nur künstlich
-        // am Leben halten. `client` bleibt ebenfalls stark, schon weil er für den `await`-Aufruf
-        // unten gebraucht wird.
+        // verschwinden, während diese Verarbeitung noch läuft — z. B. wenn `stop()` nach
+        // `beendenZeitlimit` aufgibt, ohne diese Task abzubrechen (s. dort). Läuft der PROZESS
+        // danach weiter, schreibt diese Task ihr Ergebnis trotzdem noch in die Zwischenablage,
+        // sobald sie fertig ist — dafür ist die starke Referenz da.
+        //
+        // Klargestellt (M4-Abschluss-Review, „Zusätzlich, klein"): Das ist KEINE Garantie fürs
+        // Beenden der App selbst. `applicationShouldTerminate` (`TypeLessApp.swift`) ruft direkt
+        // nach `dictation.stop()` `state.shutdown()` auf und lässt AppKit danach den Prozess
+        // beenden — eine zu diesem Zeitpunkt noch offene Verarbeitung geht dann tatsächlich
+        // verloren, das starke Fangen von `pasteboard` hin oder her (es gibt schlicht keinen
+        // laufenden Prozess mehr, der noch etwas schreiben könnte). `beendenZeitlimit` erkauft
+        // sich also nur, dass `stop()` nicht spürbar hängt — nicht, dass ein spätes Diktat noch
+        // ankommt.
+        //
+        // `self` dagegen schwach: `session` hat ohne einen noch existierenden Koordinator keinen
+        // Sinn mehr (niemand liest ihn mehr) — ihn stark zu fangen würde den Koordinator nur
+        // künstlich am Leben halten. `client` bleibt ebenfalls stark, schon weil er für den
+        // `await`-Aufruf unten gebraucht wird.
         let task = Task { [weak self, client, pasteboard] in
             do {
                 let ergebnis = try await client.process(pcm: pcm, mode: .diktat, language: nil)
@@ -425,10 +435,18 @@ public final class DictationCoordinator {
     /// Blick auf `isEmpty` reicht.
     ///
     /// Läuft die Zeit ab, gibt NUR diese Wartefunktion auf — die Verarbeitungen selbst werden
-    /// NICHT abgebrochen und laufen im Hintergrund weiter; ihr Ergebnis landet trotzdem noch in
-    /// der Zwischenablage, sobald sie fertig sind (s. `verarbeite`, starkes Fangen von
-    /// `pasteboard`). Ein fertig gesprochenes Diktat zu retten ist wichtig — aber nicht um den
-    /// Preis, dass sich die App nicht mehr beenden lässt.
+    /// NICHT abgebrochen und laufen im Hintergrund weiter; LÄUFT DER PROZESS DANACH WEITER,
+    /// landet ihr Ergebnis trotzdem noch in der Zwischenablage, sobald sie fertig sind (s.
+    /// `verarbeite`, starkes Fangen von `pasteboard`).
+    ///
+    /// Klargestellt (M4-Abschluss-Review, „Zusätzlich, klein"): In DIESER App ist das keine
+    /// Garantie, dass ein spätes Diktat noch ankommt — `applicationShouldTerminate`
+    /// (`TypeLessApp.swift`) ruft direkt nach `dictation.stop()` `state.shutdown()` auf und lässt
+    /// AppKit anschließend den Prozess beenden. Eine Verarbeitung, die zu diesem Zeitpunkt noch
+    /// offen ist, geht dann tatsächlich verloren — es gibt keinen laufenden Prozess mehr, der sie
+    /// noch zu Ende bringen könnte. Der einzige Zweck dieser Obergrenze ist, dass `stop()` selbst
+    /// beim Beenden nicht spürbar hängt (Finding 4, Review zu Task 4, Minor) — nicht, ein fertig
+    /// gesprochenes Diktat über das Ende des Prozesses hinweg zu retten.
     private func warteAufVerarbeitungenMitZeitlimit() async {
         guard !verarbeitungen.isEmpty else { return }
         let deadline = ContinuousClock.now.advanced(by: beendenZeitlimit)
