@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import Testing
 @testable import TypeLessCore
@@ -7,15 +8,17 @@ import Testing
 actor FakeRecorder: AudioRecorder {
     private var samples: [Float]
     private var verloreneHaeppchen: Int
+    private var geraeteWechsel: Bool
     private var fehlerBeimStart: AudioRecorderError?
     private(set) var laeuft = false
     private(set) var startCount = 0
     private(set) var stopCount = 0
 
-    init(samples: [Float] = [], verloreneHaeppchen: Int = 0,
+    init(samples: [Float] = [], verloreneHaeppchen: Int = 0, geraeteWechsel: Bool = false,
          fehlerBeimStart: AudioRecorderError? = nil) {
         self.samples = samples
         self.verloreneHaeppchen = verloreneHaeppchen
+        self.geraeteWechsel = geraeteWechsel
         self.fehlerBeimStart = fehlerBeimStart
     }
 
@@ -38,7 +41,8 @@ actor FakeRecorder: AudioRecorder {
         stopCount += 1
         guard laeuft else { throw AudioRecorderError.notRecording }
         laeuft = false
-        return AudioRecording(werte: samples, verloreneHaeppchen: verloreneHaeppchen)
+        return AudioRecording(werte: samples, verloreneHaeppchen: verloreneHaeppchen,
+                              geraeteWechsel: geraeteWechsel)
     }
 }
 
@@ -327,4 +331,43 @@ func stopWaehrendStartetBrichtDenStartvorgangAb() async throws {
     let (werteDanach, fehlerDanach) = sammler.leeren()
     #expect(werteDanach.isEmpty)
     #expect(fehlerDanach == 0)
+}
+
+// MARK: - I2 (Review M4, Important): Geräteumschwenk während der Aufnahme
+
+@Test func geraeteWechselBeobachterErkenntEinenKonfigurationsWechsel() {
+    // I2 (Review M4, Important): Denselben Mechanismus wie `AVAudioEngineRecorder.start()`/
+    // `stop()` prüfen, OHNE echte Hardware zu brauchen — `AVAudioEngine()` lässt sich gefahrlos
+    // konstruieren (s. `echterRecorderLaesstSichErzeugen` oben), der Notification-Name ist an
+    // die OBJEKTIDENTITÄT gebunden, nicht an den Laufzustand. Die Engine hier wird NIE
+    // gestartet — reine Objektidentität zum Scopen der Notification.
+    let engine = AVAudioEngine()
+    let beobachter = GeraeteWechselBeobachter()
+    beobachter.beobachten(engine)
+
+    NotificationCenter.default.post(name: .AVAudioEngineConfigurationChange, object: engine)
+
+    #expect(beobachter.lesenUndZuruecksetzen() == true)
+    #expect(beobachter.lesenUndZuruecksetzen() == false,
+           "lesenUndZuruecksetzen() muss den Stand zurücksetzen — sonst würde eine künftige Aufnahme den Wechsel EINER VORHERIGEN erben")
+
+    beobachter.nichtMehrBeobachten()
+    // Nach nichtMehrBeobachten() darf eine weitere Notification den Beobachter nicht mehr
+    // erreichen.
+    NotificationCenter.default.post(name: .AVAudioEngineConfigurationChange, object: engine)
+    #expect(beobachter.lesenUndZuruecksetzen() == false)
+}
+
+@Test func geraeteWechselBeobachterIgnoriertNotificationsAndererEngines() {
+    // Objektidentität muss echt scopen: Eine Notification einer ANDEREN Engine darf den
+    // Beobachter nicht fälschlich auslösen.
+    let beobachteteEngine = AVAudioEngine()
+    let andereEngine = AVAudioEngine()
+    let beobachter = GeraeteWechselBeobachter()
+    beobachter.beobachten(beobachteteEngine)
+
+    NotificationCenter.default.post(name: .AVAudioEngineConfigurationChange, object: andereEngine)
+
+    #expect(beobachter.lesenUndZuruecksetzen() == false)
+    beobachter.nichtMehrBeobachten()
 }

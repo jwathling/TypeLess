@@ -303,6 +303,17 @@ public final class DictationCoordinator {
             return
         }
 
+        // I2 (Review M4, Important): AVAudioEngine stoppt sich bei einem Konfigurationswechsel
+        // (AirPods verbinden sich, Bluetooth wackelt) WÄHREND der Aufnahme SELBST — ab da kommen
+        // keine Puffer mehr, aber `stop()` liefert trotzdem brav, was bis dahin da war:
+        // `verloreneHaeppchen == 0`, nicht stumm, über der Mindestdauer. Ohne diese Prüfung ginge
+        // die HALBE Aufnahme unbemerkt an die Engine — der Nutzer hielte die Transkription für
+        // schlecht, statt den Abbruch zu bemerken. Dieselbe Behandlung wie `verloreneHaeppchen`.
+        guard !recording.geraeteWechsel else {
+            session = .failed("Audiogerät hat gewechselt — bitte erneut versuchen")
+            return
+        }
+
         // Der einzige Fehlerfall, den der Nutzer ohne Overlay und ohne Ton sonst erst beim
         // Einfügen bemerkt — nach 30 Sekunden Sprechen in ein stummes Mikrofon.
         guard !SilenceDetector.isSilent(samples) else {
