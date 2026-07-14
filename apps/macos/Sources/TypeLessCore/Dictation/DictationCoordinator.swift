@@ -9,19 +9,32 @@ public enum SessionState: Sendable, Equatable {
     case idle
     case recording
     case processing
+    /// Der Text ist fertig, konnte aber nicht sicher direkt eingefügt werden — er liegt in der
+    /// Zwischenablage, ⌘V holt ihn.
+    ///
+    /// **Kein Fehler.** Alles hat funktioniert; nur eine der vier Bedingungen fürs direkte
+    /// Einfügen war nicht erfüllt (andere App im Vordergrund, kein Textfeld im Fokus,
+    /// Passwortfeld, oder die Bedienungshilfen fehlen). Ein eigener Fall und **nicht** `.failed`,
+    /// weil das Menü sonst ein Warnzeichen zeigte, wo nichts schiefging — und weil der Anwender
+    /// genau wissen soll, dass jetzt ⌘V dran ist.
+    case inZwischenablage
     /// Der letzte Fehlschlag, im Klartext — sichtbar bis zum nächsten Diktat.
     case failed(String)
 }
 
-/// Führt Hotkey, Aufnahme, Engine und Zwischenablage zusammen.
+/// Führt Hotkey, Aufnahme, Engine und Zustellung zusammen.
 ///
 /// Ablauf: Fn gedrückt → Aufnahme startet, `/preload` läuft nebenher an. Fn losgelassen →
-/// Aufnahme stoppt, wird geprüft und (wenn brauchbar) an die Engine geschickt; das Ergebnis
-/// landet in der Zwischenablage.
+/// Aufnahme stoppt, wird geprüft und (wenn brauchbar) an die Engine geschickt.
+///
+/// **Die oberste Regel von M5:** Der fertige Text wird **entweder** an der Cursorposition
+/// eingefügt — **oder** er liegt in der Zwischenablage. Ein drittes Ergebnis gibt es nicht
+/// (s. ``stelleZu(_:zielApp:target:inserter:pasteboard:)``).
 ///
 /// **Verbindlich (Entscheidung des Anwenders):** Es gibt kein Overlay und keine Tonsignale.
 /// Deshalb bleibt bei **jedem** Fehlschlag die Zwischenablage unangetastet — dann liefert ⌘V
-/// wenigstens den alten Inhalt statt Leere.
+/// wenigstens den alten Inhalt statt Leere. Und wurde direkt eingefügt, bleibt sie ebenfalls
+/// unangetastet: „Diktieren und Kopieren dürfen sich nicht gegenseitig stören."
 @MainActor
 @Observable
 public final class DictationCoordinator {
@@ -31,6 +44,16 @@ public final class DictationCoordinator {
     private let recorder: AudioRecorder
     private let client: SidecarClient
     private let pasteboard: Pasteboard
+    private let inserter: TextInserter
+    private let target: InsertionTarget
+
+    /// Die App, die beim Fn-Druck vorne war — das ZIEL dieses Diktats.
+    ///
+    /// Wird bei **jedem** `.pressed` neu gelesen und mit dem jeweiligen Diktat mitgereicht (s.
+    /// `verarbeite`). Entscheidend ist, dass jede Verarbeitung ihren EIGENEN Wert prüft und nicht
+    /// den der jüngsten: Zwischen Loslassen und fertigem Text vergehen ~6 s, in denen der
+    /// Anwender längst woanders sein kann.
+    private var zielAppBeimDruck: pid_t?
 
     /// 300 ms bei 16 kHz. Darunter war es ein versehentliches Antippen, kein Diktat.
     private let minimumSampleCount: Int
@@ -79,6 +102,8 @@ public final class DictationCoordinator {
                 recorder: AudioRecorder,
                 client: SidecarClient,
                 pasteboard: Pasteboard,
+                inserter: TextInserter = CGEventTextInserter(),
+                target: InsertionTarget = AXInsertionTarget(),
                 minimumSampleCount: Int = 4_800,
                 beendenZeitlimit: Duration = .seconds(10),
                 beendenPollIntervall: Duration = .milliseconds(20),
@@ -88,6 +113,8 @@ public final class DictationCoordinator {
         self.recorder = recorder
         self.client = client
         self.pasteboard = pasteboard
+        self.inserter = inserter
+        self.target = target
         self.minimumSampleCount = minimumSampleCount
         self.beendenZeitlimit = beendenZeitlimit
         self.beendenPollIntervall = beendenPollIntervall
@@ -231,6 +258,10 @@ public final class DictationCoordinator {
         // in `handleReleased()`, ob Fn als Modifier benutzt wurde (s. `KeyDownCounter`).
         zaehlerBeimDruck = keyDownCounter.aktuellerStand()
 
+        // M5: Ziel-App so früh wie möglich merken — jetzt steht der Cursor noch dort, wo der
+        // Anwender diktieren will. Beim Zustellen (in ~6 s) wird dagegen geprüft.
+        zielAppBeimDruck = target.vordersteApp()
+
         // C1 (Review M4, Critical): Verliert der Koordinator ein `.released` (macOS schaltet den
         // CGEventTap kurz ab — `FnKeyMonitor` macht ihn selbst wieder scharf, aber das Ereignis,
         // das GENAU in dieses Fenster fiel, ist unwiederbringlich weg), bleibt `session` auf
@@ -353,12 +384,19 @@ public final class DictationCoordinator {
         }
 
         session = .processing
-        verarbeite(samples)
+        verarbeite(samples, zielApp: zielAppBeimDruck)
     }
 
     // MARK: - Verarbeitung
 
-    private func verarbeite(_ samples: [Float]) {
+    /// Ergebnis einer Zustellung — was ist mit dem fertigen Text tatsächlich passiert?
+    private enum Zustellung: Equatable {
+        case eingefuegt
+        case inZwischenablage
+        case fehler(String)
+    }
+
+    private func verarbeite(_ samples: [Float], zielApp: pid_t?) {
         let pcm = samples.withUnsafeBufferPointer { Data(buffer: $0) }
         // Die Task über eine Kennung verwalten, nicht über sich selbst: Eine lokale Variable,
         // die ihre eigene Closure einfängt, ist unter strict concurrency nicht erlaubt.
@@ -367,12 +405,15 @@ public final class DictationCoordinator {
         // `juengsteVerarbeitung` (Finding 3, Review zu Task 4).
         juengsteVerarbeitung = id
 
-        // `pasteboard` bewusst STARK gefangen, `self` dagegen SCHWACH (Finding 4, Review zu
-        // Task 4, Minor — sonst leicht als Versehen "korrigiert"): Der Koordinator kann
-        // verschwinden, während diese Verarbeitung noch läuft — z. B. wenn `stop()` nach
-        // `beendenZeitlimit` aufgibt, ohne diese Task abzubrechen (s. dort). Läuft der PROZESS
-        // danach weiter, schreibt diese Task ihr Ergebnis trotzdem noch in die Zwischenablage,
-        // sobald sie fertig ist — dafür ist die starke Referenz da.
+        // `pasteboard` — und seit M5 ebenso `inserter` und `target` — bewusst STARK gefangen,
+        // `self` dagegen SCHWACH (Finding 4, Review zu Task 4, Minor — sonst leicht als Versehen
+        // "korrigiert"): Der Koordinator kann verschwinden, während diese Verarbeitung noch läuft
+        // — z. B. wenn `stop()` nach `beendenZeitlimit` aufgibt, ohne diese Task abzubrechen (s.
+        // dort). Läuft der PROZESS danach weiter, stellt diese Task ihr Ergebnis trotzdem noch zu,
+        // sobald sie fertig ist — dafür sind die starken Referenzen da. Alle drei sind Werkzeuge
+        // der Zustellung und müssen die Task deshalb überleben; `zielApp` ist ein WERT und wird
+        // ohnehin mitgereicht — genau das macht die neue M5-Regel aus: Jede Verarbeitung prüft
+        // IHREN eigenen gemerkten Fokus, nicht den der jüngsten.
         //
         // Klargestellt (M4-Abschluss-Review, „Zusätzlich, klein"): Das ist KEINE Garantie fürs
         // Beenden der App selbst. `applicationShouldTerminate` (`TypeLessApp.swift`) ruft direkt
@@ -387,26 +428,71 @@ public final class DictationCoordinator {
         // Sinn mehr (niemand liest ihn mehr) — ihn stark zu fangen würde den Koordinator nur
         // künstlich am Leben halten. `client` bleibt ebenfalls stark, schon weil er für den
         // `await`-Aufruf unten gebraucht wird.
-        let task = Task { [weak self, client, pasteboard] in
+        let task = Task { [weak self, client, pasteboard, inserter, target] in
             do {
                 let ergebnis = try await client.process(pcm: pcm, mode: .diktat, language: nil)
 
                 // `refined: false` heißt: Das LLM ist ausgefallen, der Text ist trotzdem da.
                 // Das ist KEIN Fehler (M2-Vertrag) — ein Diktat geht nie verloren. Das gilt auch
                 // dann, wenn diese Verarbeitung längst nicht mehr die jüngste ist (Finding 3):
-                // Der Text landet in JEDEM Fall in der Zwischenablage — nur `session` folgt ihm
-                // ggf. nicht mehr (s. `beendeVerarbeitung`).
-                pasteboard.write(ergebnis.finalText)
+                // Der Text wird in JEDEM Fall zugestellt (eingefügt oder, wenn das nicht sicher
+                // möglich ist, in die Zwischenablage gelegt) — nur `session` folgt ihm ggf. nicht
+                // mehr (s. `beendeVerarbeitung`).
+                let zustellung = Self.stelleZu(ergebnis.finalText, zielApp: zielApp,
+                                               target: target, inserter: inserter,
+                                               pasteboard: pasteboard)
                 // Kein `await`: Diese Task übernimmt bei ihrer Erzeugung die MainActor-Isolation
-                // von `verarbeite(_:)` — wir sind hier bereits auf dem MainActor, der Aufruf ist
-                // synchron (`beendeVerarbeitung` ist bewusst nicht `async`).
-                self?.beendeVerarbeitung(id: id, fehler: nil)
+                // von `verarbeite(_:zielApp:)` — wir sind hier bereits auf dem MainActor, der
+                // Aufruf ist synchron (`beendeVerarbeitung` ist bewusst nicht `async`).
+                self?.beendeVerarbeitung(id: id, zustellung: zustellung)
             } catch {
-                // Zwischenablage bleibt unangetastet: Der alte Inhalt ist besser als Leere.
-                self?.beendeVerarbeitung(id: id, fehler: Self.beschreibe(error))
+                // Echter Fehler (Engine weg, STT-Ausfall): Die Zwischenablage bleibt unangetastet
+                // — der alte Inhalt ist besser als Leere.
+                self?.beendeVerarbeitung(id: id, zustellung: .fehler(Self.beschreibe(error)))
             }
         }
         verarbeitungen[id] = task
+    }
+
+    /// Die vier Bedingungen aus der Spec — **alle** müssen erfüllt sein, sonst Zwischenablage.
+    ///
+    /// Bewusst `static` und ohne `self`: Diese Entscheidung hängt AUSSCHLIESSLICH von den
+    /// mitgereichten Werten ab (`zielApp` dieses Diktats), nie vom aktuellen Zustand des
+    /// Koordinators. Genau das ist die gefallene M4-Regel — ein überholtes Diktat darf nicht
+    /// dorthin tippen, wo der Anwender INZWISCHEN steht.
+    private static func stelleZu(_ text: String,
+                                 zielApp: pid_t?,
+                                 target: InsertionTarget,
+                                 inserter: TextInserter,
+                                 pasteboard: Pasteboard) -> Zustellung {
+        // Leerer Text: nichts zu tun, nichts anzufassen.
+        guard !text.isEmpty else { return .eingefuegt }
+
+        // Bedingung 2: dieselbe App wie beim Fn-Druck.
+        guard let zielApp, target.vordersteApp() == zielApp else {
+            pasteboard.write(text)
+            return .inZwischenablage
+        }
+
+        // Bedingungen 1, 3 und 4: Recht vorhanden, beschreibbares Textfeld, kein Passwortfeld.
+        // `.unbekannt` deckt den Fall "Bedienungshilfen fehlen" ab — dann wird NICHT geraten:
+        // `CGEventPost` meldet nichts zurück (s. ``TextInserter``), Getipptes käme also
+        // wirkungslos an, ohne dass es jemand merkte, und das Diktat wäre spurlos weg. Diese
+        // Vorab-Prüfung ist der EINZIGE Schutz davor — sie ist Pflicht, nicht Kür.
+        guard target.fokusziel() == .beschreibbaresTextfeld else {
+            pasteboard.write(text)
+            return .inZwischenablage
+        }
+
+        do {
+            try inserter.insert(text)
+            // Erfolg: Die Zwischenablage bleibt UNANGETASTET (Entscheidung des Anwenders).
+            return .eingefuegt
+        } catch {
+            // Ein Diktat darf nie verloren gehen.
+            pasteboard.write(text)
+            return .inZwischenablage
+        }
     }
 
     /// Setzt den Zustand nach einer Verarbeitung — aber **nur**, wenn sie erstens noch die
@@ -419,14 +505,20 @@ public final class DictationCoordinator {
     ///   der Zustand von der älteren schon auf `.idle` gesetzt wurde.
     /// - Ohne die `session == .processing`-Prüfung würde ein spät eintreffendes Ergebnis eine
     ///   inzwischen neu gestartete Aufnahme wegblenden (Regel 6).
-    /// In beiden Fällen gilt unverändert: Die Zwischenablage bekommt das Ergebnis TROTZDEM (s.
-    /// `verarbeite`) — nur die Zustandsanzeige folgt einer nicht mehr aktuellen Verarbeitung
-    /// nicht mehr.
-    private func beendeVerarbeitung(id: UUID, fehler: String?) {
+    ///
+    /// **Wichtig (M5):** Diese beiden Prüfungen betreffen ausschließlich die **Anzeige**. Über die
+    /// **Zustellung** entscheiden sie nicht mehr — die ist längst passiert (s. `stelleZu`) und
+    /// richtet sich nach dem Fokus, den DIESES Diktat sich gemerkt hat. Der Text kommt in jedem
+    /// Fall an; nur die Zustandsanzeige folgt einer nicht mehr aktuellen Verarbeitung nicht mehr.
+    private func beendeVerarbeitung(id: UUID, zustellung: Zustellung) {
         verarbeitungen[id] = nil
         guard id == juengsteVerarbeitung else { return }
         guard session == .processing else { return }
-        session = fehler.map { .failed($0) } ?? .idle
+        switch zustellung {
+        case .eingefuegt: session = .idle
+        case .inZwischenablage: session = .inZwischenablage
+        case let .fehler(grund): session = .failed(grund)
+        }
     }
 
     /// Wartet auf alle offenen Verarbeitungen — aber höchstens bis `beendenZeitlimit` (Finding 4,

@@ -49,6 +49,9 @@ struct TypeLessApp: App {
         switch dictation.session {
         case .recording: "mic.circle.fill"
         case .processing: "ellipsis.circle"
+        // Kein Warnzeichen: Es ist nichts schiefgegangen — der Text konnte nur nicht sicher direkt
+        // eingefügt werden und wartet in der Zwischenablage auf ⌘V.
+        case .inZwischenablage: "doc.on.clipboard"
         case .failed: "exclamationmark.circle"
         case .idle:
             switch state.engine {

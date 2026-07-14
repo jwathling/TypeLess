@@ -66,6 +66,8 @@ struct MenuContent: View {
         switch dictation.session {
         case .recording: "🔴 Nimmt auf …"
         case .processing: "Verarbeite …"
+        // Kein Fehler — nur ein anderer Weg: Der Text ließ sich nicht sicher direkt einfügen.
+        case .inZwischenablage: "In der Zwischenablage — ⌘V zum Einfügen"
         case let .failed(grund): "Fehler: \(grund)"
         case .idle:
             switch state.engine {
