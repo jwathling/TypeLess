@@ -12,10 +12,11 @@ public enum SessionState: Sendable, Equatable {
     /// Der Text ist fertig, konnte aber nicht sicher direkt eingefügt werden — er liegt in der
     /// Zwischenablage, ⌘V holt ihn.
     ///
-    /// **Kein Fehler.** Alles hat funktioniert; nur eine der vier Bedingungen fürs direkte
-    /// Einfügen war nicht erfüllt (andere App im Vordergrund, kein Textfeld im Fokus,
-    /// Passwortfeld, oder TypeLess kann es nicht wissen — fehlende Bedienungshilfen bzw. aktives
-    /// Secure Event Input). Ein eigener Fall und **nicht** `.failed`,
+    /// **Kein Fehler.** Alles hat funktioniert; nur eine der fünf Bedingungen fürs direkte
+    /// Einfügen war nicht erfüllt (andere App im Vordergrund, **anderes Textfeld als beim
+    /// Fn-Druck**, kein Textfeld im Fokus, Passwortfeld, oder TypeLess kann es nicht wissen —
+    /// fehlende Bedienungshilfen bzw. aktives Secure Event Input). Ein eigener Fall und
+    /// **nicht** `.failed`,
     /// weil das Menü sonst ein Warnzeichen zeigte, wo nichts schiefging — und weil der Anwender
     /// genau wissen soll, dass jetzt ⌘V dran ist.
     case inZwischenablage
@@ -30,7 +31,7 @@ public enum SessionState: Sendable, Equatable {
 ///
 /// **Die oberste Regel von M5:** Der fertige Text wird **entweder** an der Cursorposition
 /// eingefügt — **oder** er liegt in der Zwischenablage. Ein drittes Ergebnis gibt es nicht
-/// (s. ``stelleZu(_:zielApp:target:inserter:pasteboard:)``).
+/// (s. ``stelleZu(_:zielApp:zielFokus:target:inserter:pasteboard:)``).
 ///
 /// **Verbindlich (Entscheidung des Anwenders):** Es gibt kein Overlay und keine Tonsignale.
 /// Deshalb bleibt bei **jedem** Fehlschlag die Zwischenablage unangetastet — dann liefert ⌘V
@@ -55,6 +56,28 @@ public final class DictationCoordinator {
     /// den der jüngsten: Zwischen Loslassen und fertigem Text vergehen ~6 s, in denen der
     /// Anwender längst woanders sein kann.
     private var zielAppBeimDruck: pid_t?
+
+    /// Das Textfeld, in dem beim Fn-Druck der Cursor stand — das ZIEL dieses Diktats, genauer als
+    /// die App allein.
+    ///
+    /// **Warum das nötig ist (Abschluss-Review M5):** Die Ziel-App allein reicht nicht. Der
+    /// Anwender diktiert in ein Textfeld im Browser, drückt in den ~6 s Wartezeit ⌘L und steht in
+    /// der Adressleiste: gleiche Prozesskennung, beschreibbares Textfeld, kein Passwortfeld — alle
+    /// bisherigen Bedingungen erfüllt, und das Diktat landete in der Adressleiste. Dasselbe in Mail
+    /// zwischen Rumpf und Betreff. Entscheidung des Anwenders: „Wenn ich diktiere, muss ich mit dem
+    /// Cursor schon in irgendein Textfeld von irgendeiner Anwendung geklickt haben. Dort soll der
+    /// Text dann eingefügt werden."
+    ///
+    /// Wird — genau wie ``zielAppBeimDruck`` — bei jedem `.pressed` neu gelesen und als **Wert**
+    /// mit dem jeweiligen Diktat mitgereicht (s. `verarbeite`), nicht als Zustand geprüft: Jede
+    /// Verarbeitung prüft IHR eigenes gemerktes Feld, nicht das der jüngsten (die gefallene
+    /// M4-Regel, s. Kommentar bei `stelleZu`).
+    ///
+    /// **Bewusst akzeptierter Preis:** Manche Apps bauen ihre AX-Elemente im Hintergrund neu, ohne
+    /// dass der Anwender etwas tut — dann weicht TypeLess gelegentlich unnötig auf die
+    /// Zwischenablage aus, obwohl der Cursor gar nicht bewegt wurde. Das ist der harmlosere Fehler;
+    /// der umgekehrte (Diktat in der Adressleiste) ist der ärgerlichere.
+    private var fokusBeimDruck: Fokuskennung?
 
     /// 300 ms bei 16 kHz. Darunter war es ein versehentliches Antippen, kein Diktat.
     private let minimumSampleCount: Int
@@ -259,9 +282,12 @@ public final class DictationCoordinator {
         // in `handleReleased()`, ob Fn als Modifier benutzt wurde (s. `KeyDownCounter`).
         zaehlerBeimDruck = keyDownCounter.aktuellerStand()
 
-        // M5: Ziel-App so früh wie möglich merken — jetzt steht der Cursor noch dort, wo der
-        // Anwender diktieren will. Beim Zustellen (in ~6 s) wird dagegen geprüft.
+        // M5: Ziel-App UND Ziel-Textfeld so früh wie möglich merken — jetzt steht der Cursor noch
+        // dort, wo der Anwender diktieren will. Beim Zustellen (in ~6 s) wird gegen BEIDES geprüft:
+        // Die App allein unterscheidet nicht zwischen dem Textfeld einer Seite und der Adressleiste
+        // desselben Browsers (s. `fokusBeimDruck`).
         zielAppBeimDruck = target.vordersteApp()
+        fokusBeimDruck = target.fokusKennung()
 
         // C1 (Review M4, Critical): Verliert der Koordinator ein `.released` (macOS schaltet den
         // CGEventTap kurz ab — `FnKeyMonitor` macht ihn selbst wieder scharf, aber das Ereignis,
@@ -385,7 +411,7 @@ public final class DictationCoordinator {
         }
 
         session = .processing
-        verarbeite(samples, zielApp: zielAppBeimDruck)
+        verarbeite(samples, zielApp: zielAppBeimDruck, zielFokus: fokusBeimDruck)
     }
 
     // MARK: - Verarbeitung
@@ -402,7 +428,7 @@ public final class DictationCoordinator {
         case fehler(String)
     }
 
-    private func verarbeite(_ samples: [Float], zielApp: pid_t?) {
+    private func verarbeite(_ samples: [Float], zielApp: pid_t?, zielFokus: Fokuskennung?) {
         let pcm = samples.withUnsafeBufferPointer { Data(buffer: $0) }
         // Die Task über eine Kennung verwalten, nicht über sich selbst: Eine lokale Variable,
         // die ihre eigene Closure einfängt, ist unter strict concurrency nicht erlaubt.
@@ -420,6 +446,9 @@ public final class DictationCoordinator {
         // der Zustellung und müssen die Task deshalb überleben; `zielApp` ist ein WERT und wird
         // ohnehin mitgereicht — genau das macht die neue M5-Regel aus: Jede Verarbeitung prüft
         // IHREN eigenen gemerkten Fokus, nicht den der jüngsten.
+        //
+        // Dasselbe gilt für `zielFokus` (Abschluss-Review M5): ebenfalls ein WERT, ebenfalls
+        // mitgereicht — jede Verarbeitung prüft IHR gemerktes Textfeld, nicht das der jüngsten.
         //
         // Klargestellt (M4-Abschluss-Review, „Zusätzlich, klein"): Das ist KEINE Garantie fürs
         // Beenden der App selbst. `applicationShouldTerminate` (`TypeLessApp.swift`) ruft direkt
@@ -445,6 +474,7 @@ public final class DictationCoordinator {
                 // möglich ist, in die Zwischenablage gelegt) — nur `session` folgt ihm ggf. nicht
                 // mehr (s. `beendeVerarbeitung`).
                 let zustellung = Self.stelleZu(ergebnis.finalText, zielApp: zielApp,
+                                               zielFokus: zielFokus,
                                                target: target, inserter: inserter,
                                                pasteboard: pasteboard)
                 // Kein `await`: Diese Task übernimmt bei ihrer Erzeugung die MainActor-Isolation
@@ -460,14 +490,15 @@ public final class DictationCoordinator {
         verarbeitungen[id] = task
     }
 
-    /// Die vier Bedingungen aus der Spec — **alle** müssen erfüllt sein, sonst Zwischenablage.
+    /// Die fünf Bedingungen der Zustellung — **alle** müssen erfüllt sein, sonst Zwischenablage.
     ///
     /// Bewusst `static` und ohne `self`: Diese Entscheidung hängt AUSSCHLIESSLICH von den
-    /// mitgereichten Werten ab (`zielApp` dieses Diktats), nie vom aktuellen Zustand des
-    /// Koordinators. Genau das ist die gefallene M4-Regel — ein überholtes Diktat darf nicht
-    /// dorthin tippen, wo der Anwender INZWISCHEN steht.
+    /// mitgereichten Werten ab (`zielApp` und `zielFokus` DIESES Diktats), nie vom aktuellen
+    /// Zustand des Koordinators. Genau das ist die gefallene M4-Regel — ein überholtes Diktat darf
+    /// nicht dorthin tippen, wo der Anwender INZWISCHEN steht.
     private static func stelleZu(_ text: String,
                                  zielApp: pid_t?,
+                                 zielFokus: Fokuskennung?,
                                  target: InsertionTarget,
                                  inserter: TextInserter,
                                  pasteboard: Pasteboard) -> Zustellung {
@@ -497,6 +528,32 @@ public final class DictationCoordinator {
         // Getipptes angekommen ist, gibt es auf der CGEvent-Schnittstelle nicht (s. ``TextInserter``).
         // Sie deckt die bekannten Gründe fürs Verpuffen ab, nicht beweisbar alle: Pflicht, nicht Kür.
         guard target.fokusziel() == .beschreibbaresTextfeld else {
+            pasteboard.write(text)
+            return .inZwischenablage
+        }
+
+        // Bedingung 5 (Abschluss-Review M5): dasselbe TEXTFELD wie beim Fn-Druck.
+        //
+        // Die App-Prüfung oben sieht nicht, was INNERHALB einer App passiert: ⌘L im Browser
+        // (Adressleiste), Tab in Mail (Betreff) — gleiche Prozesskennung, beschreibbares Textfeld,
+        // kein Passwortfeld. Alle vier bisherigen Bedingungen wären erfüllt, und das Diktat landete
+        // in der Adressleiste. Also wird zusätzlich verglichen, ob der Cursor noch in DEM Feld
+        // steht, in das der Anwender vor dem Sprechen geklickt hat.
+        //
+        // **Datenschutz:** Verglichen wird ausschließlich die IDENTITÄT des Elements
+        // (``Fokuskennung``, undurchsichtig, nur `==`), niemals sein Inhalt — TypeLess erfährt nie,
+        // was in dem Feld steht, in das es schreibt.
+        //
+        // `guard let zielFokus`: Ist beim Fn-Druck GAR KEINE Kennung gemerkt worden (kein Recht,
+        // kein fokussiertes Element), wird nicht getippt. „Nichts gemerkt" ist kein Freibrief — die
+        // Zwischenablage ist hier die sichere Antwort, nicht das Raten.
+        //
+        // **Bewusst akzeptierter Preis** (dem Anwender genannt, von ihm angenommen): Manche Apps
+        // bauen ihre AX-Elemente im Hintergrund neu, ohne dass der Anwender etwas tut — dann weicht
+        // TypeLess hier gelegentlich unnötig auf die Zwischenablage aus, obwohl der Cursor nie
+        // bewegt wurde. Das ist der harmlosere Fehler; der umgekehrte (Diktat in der Adressleiste)
+        // ist der ärgerlichere.
+        guard let zielFokus, target.fokusKennung() == zielFokus else {
             pasteboard.write(text)
             return .inZwischenablage
         }

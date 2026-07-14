@@ -73,3 +73,45 @@ func mitBedienungshilfenLiefertDasFokuszielEineEchteAntwort() {
     #expect(ziel.fokusziel() != .unbekannt,
             ".unbekannt bedeutet ausschließlich: TypeLess kann es nicht wissen")
 }
+
+// MARK: - Abschluss-Review M5: die Identität des fokussierten Elements
+
+@Test
+func ohneBedienungshilfenGibtEsKeineFokuskennung() {
+    // Ohne Recht liefert AX kein fokussiertes Element — dann darf hier auch keine Identität
+    // herauskommen. `nil` ist die sichere Antwort: Beim Zustellen führt eine fehlende gemerkte
+    // Kennung auf die Zwischenablage, nie ins Tippen (s. `DictationCoordinator.stelleZu`).
+    //
+    // Läuft IMMER (injizierte Vertrauensprüfung, s. `AXInsertionTarget.istVertrauenswuerdig`) —
+    // eine Wache, die sich auf einer Maschine MIT Recht selbst überspringt, wacht nicht.
+    let ziel = AXInsertionTarget(istVertrauenswuerdig: { false }, sichereEingabeAktiv: { false })
+
+    #expect(ziel.fokusKennung() == nil, "ohne Recht gibt es keine Identität zu vergleichen")
+}
+
+@Test
+func fokuskennungenVergleichenNurIdentitaeten() {
+    // Der ganze Vertrag dieses Typs in einer Probe: gleiche Kennung → gleich, andere → ungleich.
+    // Mehr kann er nicht, und mehr DARF er nicht: Er trägt die IDENTITÄT eines Elements, nie
+    // seinen Inhalt (Datenschutz-Grenze dieses Projekts).
+    #expect(Fokuskennung.fuerTest(1) == Fokuskennung.fuerTest(1))
+    #expect(Fokuskennung.fuerTest(1) != Fokuskennung.fuerTest(2),
+            "zwei verschiedene Textfelder derselben App dürfen nie als dasselbe gelten")
+}
+
+@Test(.enabled(if: bedienungshilfenVorhanden))
+func mitBedienungshilfenIstDieFokuskennungInSichStabil() {
+    // Zweimal hintereinander gefragt, ohne dass sich etwas bewegt hat: Es muss dieselbe Identität
+    // herauskommen — sonst wiche TypeLess IMMER auf die Zwischenablage aus (die neue Bedingung
+    // träfe nie zu) und das direkte Einfügen wäre in der Praxis tot. `CFEqual` auf `AXUIElement`
+    // ist genau die Frage "derselbe Knoten in derselben App?" — es liest das Element nicht aus.
+    //
+    // Im Testrunner ist typischerweise gar nichts fokussiert; dann sind beide Antworten `nil` —
+    // auch das ist "in sich stabil" und für diese Probe in Ordnung. Es geht hier ausschließlich
+    // darum, dass die Kennung nicht bei jedem Aufruf von selbst eine andere wird.
+    let ziel = AXInsertionTarget(istVertrauenswuerdig: { AXIsProcessTrusted() },
+                                 sichereEingabeAktiv: { false })
+
+    #expect(ziel.fokusKennung() == ziel.fokusKennung(),
+            "ohne Fokuswechsel muss zweimal dieselbe Identität herauskommen")
+}

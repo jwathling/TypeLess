@@ -34,6 +34,65 @@ public enum Fokusziel: Sendable, Equatable {
     case unbekannt
 }
 
+/// Die **Identität** des fokussierten Elements — undurchsichtig und ausschließlich vergleichbar.
+///
+/// **Datenschutz (die harte Grenze dieses Projekts):** Dieser Typ trägt die IDENTITÄT eines
+/// Elements, **nie seinen Inhalt**. Er lässt sich auf `==` prüfen und sonst nichts: Es gibt keine
+/// Möglichkeit, aus ihm auszulesen, was in dem Feld steht — der gekapselte `AXUIElement` ist
+/// `private` und wird nur an `CFEqual` gereicht. TypeLess erfährt so, OB der Cursor noch im selben
+/// Feld steht, aber nie, WAS darin steht.
+///
+/// Bewusst **undurchsichtig** und nicht etwa ein durchgereichter `AXUIElement`: Der
+/// ``DictationCoordinator`` muss ohne echtes Fenster und ohne Bedienungshilfen vollständig testbar
+/// bleiben. Ein Protokoll, das rohe `AXUIElement` durchreicht, machte das unmöglich — eine
+/// Testattrappe kann keinen echten AX-Knoten erfinden. Deshalb zwei Ausprägungen: im Produktivcode
+/// ein `AXUIElement`, im Test eine schlichte Zahl (s. ``fuerTest(_:)``).
+public struct Fokuskennung: Equatable, @unchecked Sendable {
+    /// `@unchecked Sendable` und der Grund dafür: `AXUIElement` ist ein CF-Typ und damit für den
+    /// Compiler nicht `Sendable`, obwohl er hier nachweislich sicher zwischen Ausführungskontexten
+    /// reisen kann — er ist ein **unveränderlicher, undurchsichtiger Handle**, auf dem dieser Typ
+    /// ausschließlich `CFEqual` aufruft (lesend, threadsicher). Gebraucht wird das, weil die
+    /// Kennung vom `@MainActor` in die Verarbeitungs-Task dieses Diktats mitreist.
+    private enum Inhalt {
+        /// Der echte Weg: der fokussierte AX-Knoten.
+        case ax(AXUIElement)
+        /// Der Testweg: eine erfundene Kennung, ohne jede AX-Beteiligung.
+        case erfunden(UInt64)
+    }
+
+    private let inhalt: Inhalt
+
+    /// **Modulintern, kein `public`** — gleiche Bauart und gleicher Grund wie
+    /// ``AXInsertionTarget/istVertrauenswuerdig``: Könnte die App-Schicht Kennungen selbst bauen,
+    /// ließe sich die Fokusprüfung von außen aushebeln (zwei frisch gebaute, künstlich gleiche
+    /// Kennungen — und schon tippt TypeLess wieder in die Adressleiste). Nur ``AXInsertionTarget``
+    /// erzeugt echte Kennungen.
+    init(ax element: AXUIElement) { inhalt = .ax(element) }
+
+    /// **Nur für Tests** (modulintern, s. o.): eine Element-Identität ohne Element. Damit kann die
+    /// Testattrappe zwei verschiedene „Textfelder" derselben App unterscheidbar machen, ohne dass
+    /// je ein Fenster geöffnet oder ein Recht erteilt werden müsste.
+    static func fuerTest(_ kennung: UInt64) -> Fokuskennung {
+        Fokuskennung(inhalt: .erfunden(kennung))
+    }
+
+    private init(inhalt: Inhalt) { self.inhalt = inhalt }
+
+    /// Vergleicht **nur Identitäten**, nie Inhalte. `CFEqual` ist für `AXUIElement` genau die
+    /// Frage „derselbe Knoten in derselben App?" — es liest das Element nicht aus.
+    public static func == (links: Fokuskennung, rechts: Fokuskennung) -> Bool {
+        switch (links.inhalt, rechts.inhalt) {
+        case let (.ax(a), .ax(b)): return CFEqual(a, b)
+        case let (.erfunden(a), .erfunden(b)): return a == b
+        // Ein echtes Element ist nie dasselbe wie eine erfundene Kennung. Kann im Betrieb nicht
+        // vorkommen (ein Ziel liefert immer nur eine Sorte), muss aber entschieden werden — und
+        // „ungleich" ist hier die sichere Antwort: Sie führt auf die Zwischenablage, nicht ins
+        // Tippen.
+        default: return false
+        }
+    }
+}
+
 /// Fragt, wohin eingefügt werden dürfte. **Fragt nur — schreibt nie.**
 ///
 /// Als Protokoll, damit der ``DictationCoordinator`` ohne echtes Fenster und ohne erteilte
@@ -43,12 +102,26 @@ public protocol InsertionTarget: Sendable {
     func vordersteApp() -> pid_t?
     /// Art des Elements, das gerade den Tastaturfokus hat.
     func fokusziel() -> Fokusziel
+    /// **Identität** des Elements, das gerade den Tastaturfokus hat — `nil`, wenn keines fokussiert
+    /// ist oder TypeLess es nicht wissen kann (fehlende Bedienungshilfen).
+    ///
+    /// Die App-Kennung allein reicht nicht: Innerhalb DERSELBEN App kann der Anwender während der
+    /// ~6 s Wartezeit in ein anderes Feld springen (⌘L in die Adressleiste des Browsers, Tab vom
+    /// Mail-Rumpf ins Betreff-Feld). Ohne diese Frage wären alle übrigen Bedingungen erfüllt —
+    /// gleiche App, beschreibbares Textfeld, kein Passwortfeld — und das Diktat landete in der
+    /// Adressleiste. Deshalb merkt sich jedes Diktat beim Fn-Druck zusätzlich, in WELCHEM Feld es
+    /// gesprochen wurde (s. ``DictationCoordinator``).
+    ///
+    /// **Datenschutz:** Liefert ausschließlich die vergleichbare Identität (``Fokuskennung``),
+    /// niemals den Inhalt des Feldes.
+    func fokusKennung() -> Fokuskennung?
 }
 
 /// Die echte Umsetzung über die Bedienungshilfen-Schnittstelle (AX).
 ///
-/// **Datenschutz:** Gefragt wird ausschließlich nach der ROLLE des fokussierten Elements und
-/// danach, ob es beschreibbar ist. Der **Inhalt** des Feldes wird nie gelesen —
+/// **Datenschutz:** Gefragt wird ausschließlich nach der ROLLE des fokussierten Elements, danach,
+/// ob es beschreibbar ist, und nach seiner **Identität** (``Fokuskennung`` — vergleichbar, nicht
+/// auslesbar). Der **Inhalt** des Feldes wird nie gelesen —
 /// `kAXValueAttribute` wird ausschließlich auf *Setzbarkeit* geprüft
 /// (`AXUIElementIsAttributeSettable`), nie ausgelesen. TypeLess erfährt also nie, was in dem
 /// Feld steht, in das es schreibt.
@@ -117,14 +190,7 @@ public struct AXInsertionTarget: InsertionTarget {
         // das Menü dem Anwender erzählt.
         guard istVertrauenswuerdig() else { return .unbekannt }
 
-        let system = AXUIElementCreateSystemWide()
-        var fokussiertes: CFTypeRef?
-        let status = AXUIElementCopyAttributeValue(
-            system, kAXFocusedUIElementAttribute as CFString, &fokussiertes)
-        guard status == .success, let element = fokussiertes else { return .keinTextfeld }
-        // `as!` wäre hier ein Absturz-Risiko, falls AX je etwas anderes liefert.
-        guard CFGetTypeID(element) == AXUIElementGetTypeID() else { return .keinTextfeld }
-        let ax = element as! AXUIElement  // sicher: TypeID oben geprüft
+        guard let ax = fokussiertesElement() else { return .keinTextfeld }
 
         var rolle: CFTypeRef?
         guard AXUIElementCopyAttributeValue(ax, kAXRoleAttribute as CFString, &rolle) == .success,
@@ -157,5 +223,37 @@ public struct AXInsertionTarget: InsertionTarget {
         else { return .keinTextfeld }
 
         return .beschreibbaresTextfeld
+    }
+
+    public func fokusKennung() -> Fokuskennung? {
+        // Ohne Recht liefert AX kein fokussiertes Element — dann gibt es auch keine Identität, die
+        // sich später vergleichen ließe. `nil` ist hier die sichere Antwort: Beim Zustellen führt
+        // eine fehlende gemerkte Kennung auf die Zwischenablage, nie ins Tippen
+        // (s. ``DictationCoordinator``). Secure Event Input wird hier bewusst NICHT geprüft — es
+        // sagt nichts über die Identität des Elements, sondern nur darüber, ob Getipptes ankäme;
+        // diese Frage beantwortet ``fokusziel()``, und dort steht die Prüfung.
+        guard istVertrauenswuerdig() else { return nil }
+        guard let ax = fokussiertesElement() else { return nil }
+        return Fokuskennung(ax: ax)
+    }
+
+    /// Der AX-Knoten mit dem Tastaturfokus — die gemeinsame Wurzel von ``fokusziel()`` und
+    /// ``fokusKennung()``.
+    ///
+    /// **Datenschutz:** Gefragt wird nur nach dem fokussierten ELEMENT, nicht nach seinem Wert.
+    /// `kAXValueAttribute` wird in diesem Typ ausschließlich auf Setzbarkeit geprüft
+    /// (`AXUIElementIsAttributeSettable`), nie ausgelesen.
+    ///
+    /// Setzt ein bereits geprüftes `istVertrauenswuerdig()` voraus (beide Aufrufer tun das) — ohne
+    /// das Recht liefert AX ohnehin nichts.
+    private func fokussiertesElement() -> AXUIElement? {
+        let system = AXUIElementCreateSystemWide()
+        var fokussiertes: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(
+            system, kAXFocusedUIElementAttribute as CFString, &fokussiertes)
+        guard status == .success, let element = fokussiertes else { return nil }
+        // `as!` wäre hier ein Absturz-Risiko, falls AX je etwas anderes liefert.
+        guard CFGetTypeID(element) == AXUIElementGetTypeID() else { return nil }
+        return (element as! AXUIElement)  // sicher: TypeID oben geprüft
     }
 }
