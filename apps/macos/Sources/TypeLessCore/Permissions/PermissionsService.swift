@@ -90,6 +90,19 @@ public protocol PermissionsService: Sendable {
     /// sagt, ob das Recht (jetzt) da ist.
     @discardableResult
     func requestInputMonitoring() -> Bool
+
+    /// Fordert die **Bedienungshilfen** an — **muss beim Programmstart aufgerufen werden**.
+    ///
+    /// Ohne dieses Recht postet `CGEvent.post` zwar klaglos, aber **nichts kommt an**: keine
+    /// Ausnahme, kein Rückgabewert, kein Hinweis — der Text erscheint einfach nicht. Genau die
+    /// Fehlerklasse, die in der M4-Handprobe einen Abend gekostet hat (dort beim `CGEventTap`,
+    /// s. ``requestInputMonitoring()``). Ohne Anfrage zeigt macOS keinen Dialog und trägt
+    /// TypeLess unter Umständen nicht einmal in die Liste ein, in der man den Schalter umlegen
+    /// könnte.
+    ///
+    /// Der Rückgabewert sagt, ob das Recht (jetzt) da ist.
+    @discardableResult
+    func requestAccessibility() -> Bool
 }
 
 public struct SystemPermissionsService: PermissionsService {
@@ -109,5 +122,21 @@ public struct SystemPermissionsService: PermissionsService {
     @discardableResult
     public func requestInputMonitoring() -> Bool {
         IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
+    }
+
+    @discardableResult
+    public func requestAccessibility() -> Bool {
+        // `kAXTrustedCheckOptionPrompt: true` ist der Unterschied zwischen "prüfen" und
+        // "anfordern" — nur damit zeigt macOS den Dialog und nimmt TypeLess in die Liste auf.
+        //
+        // Der C-Import bringt die Konstante als globale `Unmanaged<CFString>`-Variable mit, die
+        // der Compiler unter Swift 6 als nicht nebenläufigkeitssicher ablehnt — selbst ein
+        // lokales `nonisolated(unsafe)` greift hier nicht, weil schon der lesende Zugriff auf die
+        // globale Variable selbst beanstandet wird. Der Bezeichner ist laut Apple-Dokumentation
+        // mit seinem eigenen Namen als String-Wert definiert; das umgeht den Zugriff auf die
+        // globale Variable komplett, statt die Prüfung mit `@preconcurrency` pauschal
+        // abzuschalten.
+        let options = ["AXTrustedCheckOptionPrompt": true]
+        return AXIsProcessTrustedWithOptions(options as CFDictionary)
     }
 }

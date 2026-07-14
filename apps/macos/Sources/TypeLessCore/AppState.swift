@@ -90,6 +90,22 @@ public final class AppState {
         !permissions.inputMonitoring
     }
 
+    /// Fordert die Bedienungshilfen an und aktualisiert sofort die Anzeige — beim Programmstart
+    /// aufzurufen. Ohne dieses Recht kann TypeLess nie direkt einfügen; es fällt dann immer auf
+    /// die Zwischenablage zurück (ausführliche Begründung bei
+    /// ``PermissionsService/requestAccessibility()``).
+    public func requestAccessibility() {
+        permissionsService.requestAccessibility()
+        refreshPermissions()
+    }
+
+    /// Ohne Bedienungshilfen kann TypeLess Text nie direkt einfügen — es landet dann IMMER in der
+    /// Zwischenablage. Die App bleibt voll benutzbar, aber sie darf nicht so tun, als sei alles
+    /// in Ordnung (Lektion M4: „Bereit", während der Hotkey tot war).
+    public var einfuegenBrauchtBedienungshilfen: Bool {
+        !permissions.accessibility
+    }
+
     // MARK: - Polling
 
     /// Fragt den Sidecar regelmäßig, wie es ihm geht — damit ein Wegsterben auffällt.
