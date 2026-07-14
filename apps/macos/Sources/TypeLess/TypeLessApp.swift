@@ -26,7 +26,9 @@ struct TypeLessApp: App {
             hotkey: FnKeyMonitor(),
             recorder: AVAudioEngineRecorder(),
             client: client,
-            pasteboard: SystemPasteboard())
+            pasteboard: SystemPasteboard(),
+            inserter: CGEventTextInserter(),
+            target: AXInsertionTarget())
 
         _state = State(wrappedValue: state)
         _dictation = State(wrappedValue: dictation)
@@ -106,6 +108,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Erst der Aufruf hier bringt macOS dazu, zu fragen und TypeLess überhaupt in die Liste
         // der Eingabeüberwachung aufzunehmen.
         state.requestInputMonitoring()
+        // Zweites Recht, dieselbe Falle (s. requestInputMonitoring darüber): Ohne
+        // Bedienungshilfen postet `CGEvent.post` klaglos ins Leere — der Text erschiene einfach
+        // nicht. Anfordern, nicht nur prüfen.
+        state.requestAccessibility()
 
         Task { await state.start() }
         Task { await dictation.start() }
