@@ -63,6 +63,22 @@ class MLXWhisperTranscriber(Transcriber):
             audio.samples,
             path_or_hf_repo=self._model,
             language=language,  # None => Auto-Detect (empfohlen für DE+EN gemischt)
+            # Whisper verarbeitet Audio in 30-s-Fenstern und reicht per Default den Text des
+            # VORIGEN Fensters als Kontext ins nächste. Kippt ein Fenster einmal in eine
+            # Wiederholungsschleife (bekannter Whisper-Defekt, tritt bei Stille, Atmern und
+            # Hintergrundgeräuschen am Satzende auf), sät dieser Kontext die Schleife in alle
+            # folgenden Fenster — sie läuft dann bis zum Ende des Diktats durch.
+            #
+            # In der Handprobe zu M4 real passiert: Ein sonst sauberes Diktat endete in
+            # „beber beber beber …“, hunderte Male, bis zum Schluss.
+            #
+            # `condition_on_previous_text=False` kappt die Weitergabe. Preis: Whisper verliert
+            # den Kontext über Fenstergrenzen hinweg (z. B. Eigennamen, die vorher fielen). Für
+            # Diktate ist das der richtige Tausch — ein Fenster ist 30 s, so lange reicht ein
+            # Satzbogen selten, und eine Schleife zerstört das GANZE Diktat, während fehlender
+            # Kontext höchstens ein Wort kostet. Das Wörterbuch (deterministisch, danach) fängt
+            # Eigennamen ohnehin ab.
+            condition_on_previous_text=False,
         )
         return Transcription(
             text=str(result.get("text", "")).strip(),

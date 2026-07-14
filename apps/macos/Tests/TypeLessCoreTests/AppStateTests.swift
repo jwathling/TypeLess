@@ -158,6 +158,32 @@ struct FakePermissions: PermissionsService {
         PermissionStatus(microphone: granted, accessibility: granted, inputMonitoring: granted)
     }
     func openSettings(for permission: Permission) {}
+    @discardableResult func requestInputMonitoring() -> Bool { granted }
+}
+
+/// Zählt mit, ob die Eingabeüberwachung wirklich ANGEFORDERT wurde — und beginnt so, wie es beim
+/// Anwender in der Handprobe zu M4 war: Recht fehlt. Erst die Anfrage erteilt es (so, als hätte
+/// der Anwender im Systemdialog auf „Erlauben" geklickt).
+final class ZaehlendePermissions: PermissionsService, @unchecked Sendable {
+    private let lock = NSLock()
+    private var erteilt = false
+    private(set) var anfragen = 0
+
+    func status() -> PermissionStatus {
+        lock.lock(); defer { lock.unlock() }
+        return PermissionStatus(microphone: erteilt, accessibility: erteilt,
+                                inputMonitoring: erteilt)
+    }
+
+    func openSettings(for permission: Permission) {}
+
+    @discardableResult
+    func requestInputMonitoring() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        anfragen += 1
+        erteilt = true
+        return true
+    }
 }
 
 /// Für Finding I1 (Review): anders als ``FakePermissions`` kann sich der Zustand während einer
@@ -177,6 +203,7 @@ final class MutablePermissions: PermissionsService, @unchecked Sendable {
     }
 
     func openSettings(for permission: Permission) {}
+    @discardableResult func requestInputMonitoring() -> Bool { status().inputMonitoring }
 }
 
 @MainActor
@@ -515,4 +542,35 @@ func doppelterStartUeberlagertKeinePollTasks() async {
 
     client.release()
     await state.shutdown()
+}
+
+// MARK: - Eingabeüberwachung (Handprobe M4)
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func eingabeueberwachungWirdAktivAngefordertUndNichtNurGeprueft() async throws {
+    // Das Fehlerbild, das das gekostet hat: Ein `CGEventTap` lässt sich auch OHNE
+    // Eingabeüberwachung anlegen — `tapCreate` liefert klaglos einen Tap, es gibt keinen Fehler.
+    // Der Tap sieht im Hintergrund nur nie ein Ereignis. Ist TypeLess dagegen die AKTIVE App
+    // (offenes Menü!), sieht er die Tastendrücke sehr wohl. Ergebnis beim Anwender: „Diktieren
+    // geht nur, solange ich das Menü offen habe."
+    //
+    // TypeLess PRÜFTE das Recht bloß und forderte es nie an — also fragte macOS auch nie und
+    // trug TypeLess unter Umständen nicht einmal in die Liste ein, in der man den Schalter
+    // umlegen könnte. Dieser Test ist die Wache davor, dass die Anfrage je wieder verschwindet.
+    let permissions = ZaehlendePermissions()
+    let state = AppState(lifecycle: FakeLifecycle(.success(.adopted)),
+                         client: StaticClient(.success(health("ready"))),
+                         permissions: permissions,
+                         pollIntervalStarting: .milliseconds(10),
+                         pollIntervalReady: .milliseconds(10))
+
+    #expect(state.hotkeyBrauchtEingabeueberwachung,
+            "vor der Anfrage fehlt das Recht — das Menü darf dann nicht „Bereit“ behaupten")
+
+    state.requestInputMonitoring()
+
+    #expect(permissions.anfragen == 1, "das Recht muss ANGEFORDERT werden, nicht nur geprüft")
+    #expect(!state.hotkeyBrauchtEingabeueberwachung,
+            "nach erteiltem Recht muss die Anzeige das sofort widerspiegeln")
 }
