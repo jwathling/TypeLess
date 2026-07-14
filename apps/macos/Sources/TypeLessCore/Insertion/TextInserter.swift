@@ -2,13 +2,31 @@ import CoreGraphics
 import Foundation
 
 public enum TextInserterError: Error, Equatable {
-    /// Das Tastatur-Ereignis ließ sich nicht erzeugen. Der Aufrufer weicht dann auf die
+    /// Das Tastatur-Ereignis ließ sich nicht **erzeugen**. Der Aufrufer weicht dann auf die
     /// Zwischenablage aus — ein Diktat darf nie verloren gehen.
+    ///
+    /// Achtung, die Umkehrung gilt **nicht**: Dass kein Fehler geworfen wird, heißt nicht, dass
+    /// der Text angekommen ist (s. ``TextInserter``). Das Posten selbst meldet nichts zurück.
     case ereignisNichtErzeugbar
 }
 
 /// Fügt Text an der Cursorposition ein, indem er Tastatur-Ereignisse erzeugt — als hätte der
 /// Anwender getippt, nur in einem Rutsch.
+///
+/// **Was dieser Typ NICHT kann — und warum der Aufrufer vorher prüfen MUSS:**
+///
+/// `CGEventPost` ist in Apples Header als `void` deklariert: kein Rückgabewert, kein Fehlerkanal.
+/// Fehlen die Bedienungshilfen (nicht erteilt, oder zur Laufzeit entzogen), verpufft das Posten
+/// **wirkungslos** — kein Zeichen erscheint, und `insert()` kehrt trotzdem **ohne Fehler** zurück.
+/// Ein `throw` aus `insert()` bedeutet also „das Ereignis ließ sich nicht **erzeugen**"; es ist
+/// **keine** Bestätigung, dass ein nicht-werfender Aufruf tatsächlich angekommen ist. Diese
+/// Bestätigung gibt es auf dieser Schnittstelle schlicht nicht.
+///
+/// Der Schutz davor liegt deshalb **außerhalb** dieses Typs: Der Aufrufer darf `insert()` nur
+/// aufrufen, wenn ``InsertionTarget/fokusziel()`` ein `.beschreibbaresTextfeld` gemeldet hat —
+/// was ohne erteilte Bedienungshilfen nie passiert (dort kommt dann `.unbekannt` heraus). Diese
+/// Vorab-Prüfung ist **Pflicht, nicht Kür**: Ohne sie tippt TypeLess ins Leere und das Diktat ist
+/// spurlos weg — genau das, was M5 ausschließen soll.
 ///
 /// Als Protokoll, damit der ``DictationCoordinator`` testbar bleibt, ohne dass im Testlauf
 /// wirklich irgendwo Text erscheint.
@@ -37,6 +55,18 @@ public struct CGEventTextInserter: TextInserter {
             throw TextInserterError.ereignisNichtErzeugbar
         }
 
+        // ERST alle Ereignisse bauen, DANN posten — bewusst in zwei Durchgängen.
+        //
+        // Naheliegender wäre eine Schleife, die jedes Häppchen sofort nach dem Bauen postet. Die
+        // hat aber einen hässlichen Fehlerfall: Scheitert das Bauen beim fünften von zehn
+        // Häppchen, stehen die ersten vier bereits **im Textfeld des Anwenders**, und `insert()`
+        // wirft trotzdem. Der Aufrufer legt daraufhin den VOLLSTÄNDIGEN Text in die
+        // Zwischenablage (so ist der Vertrag) — drückt der Anwender dann ⌘V, hat er den Anfang
+        // doppelt im Dokument.
+        //
+        // In zwei Durchgängen ist das ausgeschlossen: Geht beim Bauen etwas schief, wurde noch
+        // kein einziges Zeichen getippt. Entweder alles oder nichts.
+        var ereignisse: [CGEvent] = []
         for haeppchen in Self.zerlege(text) {
             guard let runter = CGEvent(keyboardEventSource: quelle, virtualKey: 0, keyDown: true),
                   let hoch = CGEvent(keyboardEventSource: quelle, virtualKey: 0, keyDown: false)
@@ -48,9 +78,12 @@ public struct CGEventTextInserter: TextInserter {
             runter.keyboardSetUnicodeString(stringLength: haeppchen.count,
                                             unicodeString: haeppchen)
             hoch.keyboardSetUnicodeString(stringLength: haeppchen.count, unicodeString: haeppchen)
+            ereignisse.append(runter)
+            ereignisse.append(hoch)
+        }
 
-            runter.post(tap: .cgAnnotatedSessionEventTap)
-            hoch.post(tap: .cgAnnotatedSessionEventTap)
+        for ereignis in ereignisse {
+            ereignis.post(tap: .cgAnnotatedSessionEventTap)
         }
     }
 
