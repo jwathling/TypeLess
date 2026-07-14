@@ -39,7 +39,22 @@ public protocol InsertionTarget: Sendable {
 /// (`AXUIElementIsAttributeSettable`), nie ausgelesen. TypeLess erfährt also nie, was in dem
 /// Feld steht, in das es schreibt.
 public struct AXInsertionTarget: InsertionTarget {
-    public init() {}
+    /// Ob TypeLess die Bedienungshilfen hat. **Injizierbar, und das aus einem konkreten Grund:**
+    ///
+    /// Die Regel darunter („ohne Recht NIEMALS ein Textfeld melden") ist die wichtigste
+    /// Sicherheitszusicherung dieses Typs — meldete er fälschlich ein Textfeld, tippte der
+    /// Koordinator ins Leere und das Diktat wäre spurlos weg. Genau diese Regel ließ sich mit
+    /// einem festen `AXIsProcessTrusted()` **nicht prüfen**: Auf einer Maschine mit erteiltem
+    /// Recht übersprang sich der schützende Test und blieb auch dann grün, wenn man die Regel
+    /// entfernte (in der Umsetzung von M5/Task 2 genau so beobachtet). Ein Test, der eine
+    /// Sicherheitsregel nicht scharf prüft, ist keine Wache, sondern Dekoration.
+    ///
+    /// Mit dieser Naht ist die Regel unabhängig vom Zustand der Maschine beweisbar.
+    private let istVertrauenswuerdig: @Sendable () -> Bool
+
+    public init(istVertrauenswuerdig: @escaping @Sendable () -> Bool = { AXIsProcessTrusted() }) {
+        self.istVertrauenswuerdig = istVertrauenswuerdig
+    }
 
     public func vordersteApp() -> pid_t? {
         // Braucht kein Sonderrecht.
@@ -50,7 +65,7 @@ public struct AXInsertionTarget: InsertionTarget {
         // Ohne Recht liefert AX gar nichts Verwertbares. Das MUSS als `.unbekannt` heraus und
         // darf niemals als "kein Textfeld" durchgehen — der Unterschied entscheidet darüber, was
         // das Menü dem Anwender erzählt.
-        guard AXIsProcessTrusted() else { return .unbekannt }
+        guard istVertrauenswuerdig() else { return .unbekannt }
 
         let system = AXUIElementCreateSystemWide()
         var fokussiertes: CFTypeRef?

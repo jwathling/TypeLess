@@ -16,12 +16,18 @@ func vordersteAppLiefertEinePid() {
     #expect(ziel.vordersteApp() != nil, "es ist immer irgendeine App vorne")
 }
 
-@Test(.enabled(if: !bedienungshilfenVorhanden))
+@Test
 func ohneBedienungshilfenIstDasFokuszielUnbekannt() {
     // Der wichtigste Fall für die Sicherheit: Ohne das Recht darf `AXInsertionTarget` NICHT
     // fälschlich `.beschreibbaresTextfeld` melden — sonst würde der Koordinator tippen, obwohl
     // gar nichts ankommen kann, und das Diktat wäre spurlos weg.
-    let ziel = AXInsertionTarget()
+    //
+    // Läuft IMMER, unabhängig davon, ob diese Maschine das Recht erteilt hat: Die
+    // Vertrauensprüfung wird injiziert (s. `AXInsertionTarget.istVertrauenswuerdig`). Mit einem
+    // festen `AXIsProcessTrusted()` übersprang sich dieser Test auf einer Maschine MIT Recht —
+    // und blieb dann auch dann grün, wenn man die Sicherheitsregel entfernte. Eine Wache, die
+    // sich selbst überspringt, wacht nicht.
+    let ziel = AXInsertionTarget(istVertrauenswuerdig: { false })
 
     #expect(ziel.fokusziel() == .unbekannt,
             "ohne Recht darf NIE ein Textfeld gemeldet werden — der Text ginge sonst verloren")
