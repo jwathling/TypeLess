@@ -894,3 +894,48 @@ func geraetewechselWaehrendDerAufnahmeWirdAlsFehlerGemeldetUndNichtVerarbeitet()
 
     await coordinator.stop()
 }
+
+// MARK: - I3 (Review M4, Important): unerwartetes Streamende zeigt einen toten Hotkey an
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func unerwartetesEndeDesHotkeyStreamsWirdAlsHotkeyAusfallGemeldet() async throws {
+    // I3 (Review M4, Important): FnKeyMonitor.start() war als `throws` deklariert, warf aber
+    // nie — der echte Fehlerfall (fehlende Eingabeüberwachung) endete nur den Stream, auf einem
+    // anderen Thread, ohne je durch den (unerreichbaren) `catch`-Zweig in
+    // DictationCoordinator.start() zu laufen. `beendeStreamUnerwartet()` bildet genau das nach:
+    // der Stream endet, OHNE dass der Koordinator `stop()` aufgerufen hat.
+    let hotkey = FakeHotkey()
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: FakeRecorder(),
+                                      client: DictationClient(ergebnis: .success(ergebnis("x"))),
+                                      pasteboard: SpyPasteboard())
+    await coordinator.start()
+    #expect(coordinator.session == .idle)
+
+    hotkey.beendeStreamUnerwartet()
+
+    await warteBis { if case .failed = coordinator.session { return true }; return false }
+
+    #expect(coordinator.session == .failed("Hotkey inaktiv — Eingabeüberwachung fehlt"))
+
+    await coordinator.stop()
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func hotkeyDerNieStartetWirdBeimStartAlsAusfallGemeldet() async throws {
+    // I3 (Review M4, Important): Fehlt die Berechtigung schon beim ALLERERSTEN Start (der
+    // Stream endet, bevor er auch nur ein Ereignis liefert), muss der Koordinator das ebenfalls
+    // als toten Hotkey erkennen — nicht erst bei einem SPÄTER unerwartet endenden Stream.
+    let hotkey = FakeHotkey(stirbtSofort: true)
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: FakeRecorder(),
+                                      client: DictationClient(ergebnis: .success(ergebnis("x"))),
+                                      pasteboard: SpyPasteboard())
+    await coordinator.start()
+
+    await warteBis { if case .failed = coordinator.session { return true }; return false }
+
+    #expect(coordinator.session == .failed("Hotkey inaktiv — Eingabeüberwachung fehlt"))
+
+    await coordinator.stop()
+}

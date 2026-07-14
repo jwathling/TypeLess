@@ -12,8 +12,16 @@ public enum HotkeyError: Error, Equatable {
 }
 
 /// Meldet, wann die Diktat-Taste gedrückt und losgelassen wird.
+///
+/// `start()` ist bewusst NICHT `throws` (I3, Review M4, Important, aufgeräumt): Der einzige
+/// reale Fehlerfall (fehlende Eingabeüberwachung) lässt sich bei einem `CGEventTap` erst auf
+/// einem eigenen Thread mit laufendem RunLoop feststellen, s. ``FnKeyMonitor``. Ein `throws`
+/// hier wäre für die einzige Produktionsimplementierung eine Lüge gewesen — sie warf nie, der
+/// entsprechende `catch`-Zweig im Aufrufer war toter Code. Ein Fehlschlag zeigt sich stattdessen
+/// darin, dass der gelieferte Stream endet, ohne je ein Ereignis geliefert zu haben — der
+/// Aufrufer (``DictationCoordinator``) muss das auswerten.
 public protocol HotkeyMonitor: Sendable {
-    func start() throws -> AsyncStream<HotkeyEvent>
+    func start() -> AsyncStream<HotkeyEvent>
     func stop()
 }
 
@@ -51,7 +59,7 @@ public final class FnKeyMonitor: HotkeyMonitor, @unchecked Sendable {
 
     public init() {}
 
-    public func start() throws -> AsyncStream<HotkeyEvent> {
+    public func start() -> AsyncStream<HotkeyEvent> {
         // Ein doppelter start() darf keinen zweiten Tap installieren (Vorbild:
         // AppState.startPolling(), das ebenso erst den alten Lauf beendet). stop() ist
         // idempotent — harmlos, falls noch gar nichts lief.
