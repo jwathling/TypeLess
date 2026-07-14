@@ -71,6 +71,70 @@ actor FakeRecorder: AudioRecorder {
     _ = AVAudioEngineRecorder()
 }
 
+// MARK: - Hardware-Proben am echten AVAudioEngineRecorder (Re-Review M4, Aufgabe 3)
+
+/// Hat der Testprozess (Terminal/Xcode) das Mikrofonrecht? Nur `.authorized` zählt — bei
+/// `.notDetermined` würde `AVCaptureDevice.requestAccess` einen TCC-Dialog aufziehen und den
+/// Testlauf blockieren, bis jemand klickt. Die beiden Hardware-Proben unten überspringen sich
+/// deshalb selbst, statt die Suite auf einer Maschine ohne Recht rot zu machen oder hängen zu
+/// lassen (gleiche Zurückhaltung wie `echterRecorderLaesstSichErzeugen` oben, das aus demselben
+/// Grund nie eine Aufnahme startet).
+var mikrofonRechtVorhanden: Bool {
+    AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+}
+
+/// So lange nimmt jede Hardware-Probe unten wirklich auf. 300 ms bei 16 kHz ≈ 4 800 Werte —
+/// großzügig über jeder Puffergrenze, aber kurz genug, dass die Suite nicht spürbar länger läuft.
+let hardwareAufnahmedauer = Duration.milliseconds(300)
+
+@Test(.enabled(if: mikrofonRechtVorhanden), .timeLimit(.minutes(1)))
+func echterRecorderLehntZweitenStartAbUndLaesstDieLaufendeAufnahmeIntakt() async throws {
+    // C1 Teil 2 (Review M4, Critical) — bisher die einzige Stelle ohne Probe auf ECHTEM
+    // Produktionscode: `AVAudioEngineRecorder.start()` muss einen zweiten Start ablehnen (`.laeuft`
+    // → `.alreadyRecording`, statt wie früher still `return`), OHNE dabei die laufende Aufnahme zu
+    // beschädigen — und der Recorder darf danach nicht verklemmt sein.
+    let recorder = AVAudioEngineRecorder()
+    try await recorder.start()
+
+    await #expect(throws: AudioRecorderError.alreadyRecording) {
+        try await recorder.start()
+    }
+
+    try await Task.sleep(for: hardwareAufnahmedauer)
+    let erste = try await recorder.stop()
+
+    #expect(erste.werte.count > 1_000,
+           "der abgelehnte zweite start() darf die laufende Aufnahme nicht beschädigt haben")
+    #expect(erste.verloreneHaeppchen == 0)
+
+    // Kein Verklemmen: ein FRISCHER Start danach muss wieder ganz normal aufnehmen.
+    try await recorder.start()
+    try await Task.sleep(for: hardwareAufnahmedauer)
+    let zweite = try await recorder.stop()
+
+    #expect(zweite.werte.count > 1_000,
+           "nach der abgelehnten Doppelaufnahme muss der Recorder wieder normal startbar sein")
+}
+
+@Test(.enabled(if: mikrofonRechtVorhanden), .timeLimit(.minutes(1)))
+func normalerZyklusAmEchtenRecorderMeldetKeinenGeraeteWechsel() async throws {
+    // I2 (Review M4, Important) — Gegenprobe auf ein Falsch-Positiv: Meldete ein ganz normaler
+    // start/stop-Zyklus `geraeteWechsel == true` (z. B. weil AVAudioEngine beim Start selbst eine
+    // `.AVAudioEngineConfigurationChange`-Notification schickt), würde der I2-Guard in
+    // `DictationCoordinator.handleReleased()` JEDES Diktat mit „Audiogerät hat gewechselt"
+    // verwerfen — ein Critical, das kein Test mit Attrappen sehen kann, weil nur die echte
+    // AVAudioEngine diese Notification überhaupt schickt.
+    let recorder = AVAudioEngineRecorder()
+    try await recorder.start()
+    try await Task.sleep(for: hardwareAufnahmedauer)
+    let aufnahme = try await recorder.stop()
+
+    #expect(aufnahme.geraeteWechsel == false,
+           "ein normaler Zyklus ohne echten Geräteumschwenk darf keinen Wechsel melden — sonst verwirft der I2-Guard jedes Diktat")
+    #expect(aufnahme.verloreneHaeppchen == 0)
+    #expect(aufnahme.werte.count > 1_000)
+}
+
 // MARK: - Review-Finding 1: Actor-Reentrancy in start()
 
 /// Steuerbare Mikrofon-Berechtigungsprüfung für Finding 1 (Review zu Task 2): hängt jeden

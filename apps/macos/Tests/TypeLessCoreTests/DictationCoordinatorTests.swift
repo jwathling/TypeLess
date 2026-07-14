@@ -895,6 +895,56 @@ func geraetewechselWaehrendDerAufnahmeWirdAlsFehlerGemeldetUndNichtVerarbeitet()
     await coordinator.stop()
 }
 
+// MARK: - N2 (Re-Review M4, Minor): ein gescheitertes start() darf kein offenes Mikrofon hinterlassen
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func alreadyRecordingBeimStartSchliesstDasMikrofonUndLegtDasDiktatNichtDauerhaftLahm() async throws {
+    // N2 (Re-Review M4, Minor): Wirft `recorder.start()` ein `.alreadyRecording`, lief der
+    // Recorder bisher WEITER (der generische `catch` setzte nur `session = .failed`), und ein
+    // Watchdog wurde nicht armiert — der startet erst danach. Das ist exakt der C1-Zustand, nur
+    // ohne Ausweg: Der nächste Druck sieht `session != .recording`, überspringt den Verwerf-Stop
+    // in `handlePressed()`, und `start()` wirft erneut. Mikrofon dauerhaft offen, Diktat dauerhaft
+    // tot.
+    //
+    // Nachgestellt durch einen Recorder, der bereits LÄUFT, ohne dass der Koordinator davon weiß
+    // (`session == .idle`) — genau die Lage, in der `handlePressed()` seinen Verwerf-Stop
+    // überspringt. `FakeRecorder.start()` wirft dann `.alreadyRecording` (bildet den Vertrag von
+    // `AVAudioEngineRecorder` nach, s. dort).
+    let hotkey = FakeHotkey()
+    let recorder = FakeRecorder(samples: sprache())
+    let pasteboard = SpyPasteboard()
+    let client = DictationClient(ergebnis: .success(ergebnis("frisches Diktat")))
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: recorder,
+                                      client: client, pasteboard: pasteboard)
+    await coordinator.start()
+
+    try await recorder.start()
+    #expect(await recorder.laeuft == true, "Vorbedingung: das Mikrofon ist offen")
+
+    hotkey.send(.pressed)
+    await warteBis { if case .failed = coordinator.session { return true }; return false }
+
+    #expect(coordinator.session == .failed("Aufnahme nicht möglich: alreadyRecording"))
+    #expect(await recorder.laeuft == false,
+           "ein gescheitertes start() darf unter KEINEM Umstand ein offenes Mikrofon hinterlassen")
+    #expect(pasteboard.geschrieben.isEmpty, "die Zwischenablage bleibt bei jedem Fehlschlag unangetastet")
+
+    // Der eigentliche Beweis: KEIN dauerhaft toter Zustand. Der nächste Druck muss wieder ganz
+    // normal aufnehmen und ein Diktat abliefern.
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    #expect(coordinator.session == .recording, "nach dem Fehlschlag muss ein Diktat wieder möglich sein")
+
+    hotkey.send(.released)
+    await warteBis { coordinator.session == .idle }
+
+    #expect(pasteboard.geschrieben == ["frisches Diktat"])
+    #expect(client.processCount == 1)
+
+    await coordinator.stop()
+}
+
 // MARK: - I3 (Review M4, Important): unerwartetes Streamende zeigt einen toten Hotkey an
 
 @MainActor
@@ -917,6 +967,41 @@ func unerwartetesEndeDesHotkeyStreamsWirdAlsHotkeyAusfallGemeldet() async throws
     await warteBis { if case .failed = coordinator.session { return true }; return false }
 
     #expect(coordinator.session == .failed("Hotkey inaktiv — Eingabeüberwachung fehlt"))
+
+    await coordinator.stop()
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func zweiterStartBeiLebendemHotkeyMeldetKeinenAusfall() async throws {
+    // N1 (Re-Review M4, Important): Die Unterscheidung „erwartetes/unerwartetes Streamende" hing
+    // an einem Instanz-Flag (`erwarteteHotkeyBeendigung`). Das war deterministisch falsch — kein
+    // Race, alles auf dem MainActor: `start()` rief `stopHotkey()` (Flag `true`, alte Task
+    // gecancelt, alter Stream beendet) und setzte das Flag sofort danach, OHNE jeden
+    // Suspension-Punkt, wieder auf `false`. Die alte Task kam bis dahin gar nicht zum Zug; lief
+    // sie danach aus, sah sie ein `false` und meldete „Hotkey inaktiv — Eingabeüberwachung fehlt",
+    // obwohl der neue Hotkey einwandfrei lief. Jetzt hängt die Unterscheidung an der IDENTITÄT der
+    // Task (`Task.isCancelled`).
+    let hotkey = FakeHotkey()
+    let recorder = FakeRecorder(samples: sprache())
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: recorder,
+                                      client: DictationClient(ergebnis: .success(ergebnis("x"))),
+                                      pasteboard: SpyPasteboard())
+    await coordinator.start()
+    await coordinator.start()   // zweiter Start bei LEBENDEM Hotkey
+
+    // Der alten Task Gelegenheit geben, ihren Schwanz auszulaufen — genau dort schlug der Fehler
+    // zu. `warteBis` ist beschränkt und kehrt in jedem Fall zurück (kein Hängen), auch wenn die
+    // Bedingung nie eintritt.
+    await warteBis { if case .failed = coordinator.session { return true }; return false }
+
+    #expect(coordinator.session == .idle,
+           "ein zweiter start() bei lebendem Hotkey darf keinen Hotkey-Ausfall melden")
+
+    // Und der Hotkey lebt wirklich: Ein Druck kommt weiterhin an.
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    #expect(coordinator.session == .recording, "der neu gestartete Hotkey muss Ereignisse liefern")
 
     await coordinator.stop()
 }
