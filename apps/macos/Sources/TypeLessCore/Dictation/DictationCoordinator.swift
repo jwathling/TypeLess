@@ -52,13 +52,28 @@ public final class DictationCoordinator {
     private let beendenZeitlimit: Duration
     private let beendenPollIntervall: Duration
 
+    /// C1 (Review M4, Critical): Obergrenze für eine einzelne Aufnahme. Verliert der Koordinator
+    /// ein `.released`-Ereignis (macOS schaltet den CGEventTap kurz ab, `FnKeyMonitor` macht ihn
+    /// zwar selbst wieder scharf, aber das Ereignis IN diesem Fenster ist weg), bleibt `session`
+    /// sonst für immer auf `.recording` hängen — es gibt ohne diesen Watchdog KEINEN Weg mehr
+    /// zurück, außer der Nutzer drückt erneut (s. `handlePressed()`, verwaiste Aufnahme wird dann
+    /// verworfen). 120 s sind großzügig genug für jedes echte Diktat, aber kurz genug, dass ein
+    /// wirklich verlorenes `.released` nicht auf unbestimmte Zeit ein offenes Mikrofon bedeutet.
+    private let aufnahmeObergrenze: Duration
+    /// Wacht über die aktuell laufende Aufnahme — `nil`, solange nicht aufgenommen wird. Wird bei
+    /// jedem Verlassen von `.recording` (regulär über `handleReleased()`, beim Verwerfen einer
+    /// verwaisten Aufnahme in `handlePressed()` oder beim Beenden in `stop()`) sofort abgebrochen,
+    /// s. `beendeAufnahmeWatchdog()`.
+    private var aufnahmeWatchdog: Task<Void, Never>?
+
     public init(hotkey: HotkeyMonitor,
                 recorder: AudioRecorder,
                 client: SidecarClient,
                 pasteboard: Pasteboard,
                 minimumSampleCount: Int = 4_800,
                 beendenZeitlimit: Duration = .seconds(10),
-                beendenPollIntervall: Duration = .milliseconds(20)) {
+                beendenPollIntervall: Duration = .milliseconds(20),
+                aufnahmeObergrenze: Duration = .seconds(120)) {
         self.hotkey = hotkey
         self.recorder = recorder
         self.client = client
@@ -66,6 +81,7 @@ public final class DictationCoordinator {
         self.minimumSampleCount = minimumSampleCount
         self.beendenZeitlimit = beendenZeitlimit
         self.beendenPollIntervall = beendenPollIntervall
+        self.aufnahmeObergrenze = aufnahmeObergrenze
     }
 
     // MARK: - Lebenszyklus
@@ -120,6 +136,7 @@ public final class DictationCoordinator {
         // Ergebnis wird bewusst verworfen: Wir beenden gerade den Koordinator, es gibt niemanden
         // mehr, der ein Diktat entgegennehmen würde.
         if session == .recording {
+            beendeAufnahmeWatchdog()
             _ = try? await recorder.stop()
         }
 
@@ -137,9 +154,64 @@ public final class DictationCoordinator {
         hotkey.stop()
     }
 
+    // MARK: - Aufnahme-Watchdog (C1, Review M4, Critical)
+
+    /// Startet den Watchdog für die gerade begonnene Aufnahme. `aufnahmeWatchdog?.cancel()`
+    /// entwertet dabei automatisch einen eventuell noch übrig gebliebenen älteren Watchdog —
+    /// es kann nie mehr als eine Aufnahme gleichzeitig geben (s. `handlePressed()`), also auch
+    /// nie mehr als ein gültiger Watchdog.
+    private func starteAufnahmeWatchdog() {
+        aufnahmeWatchdog?.cancel()
+        aufnahmeWatchdog = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(for: self.aufnahmeObergrenze)
+            } catch {
+                // Abgebrochen (`beendeAufnahmeWatchdog()`) — die Aufnahme wurde regulär beendet,
+                // bevor die Obergrenze erreicht wurde. Nichts zu tun.
+                return
+            }
+            await self.aufnahmeWegenUeberschreitungAbbrechen()
+        }
+    }
+
+    /// Entwertet den Watchdog der gerade laufenden (oder gerade beendeten) Aufnahme. Muss bei
+    /// JEDEM Verlassen von `.recording` aufgerufen werden — sonst würde ein längst überholter
+    /// Watchdog später noch feuern (harmlos dank des Guards in
+    /// `aufnahmeWegenUeberschreitungAbbrechen()`, aber unnötig).
+    private func beendeAufnahmeWatchdog() {
+        aufnahmeWatchdog?.cancel()
+        aufnahmeWatchdog = nil
+    }
+
+    /// Feuert nach `aufnahmeObergrenze`, wenn niemand die Taste losgelassen hat — ohne diesen
+    /// Watchdog gäbe es aus einem hängen gebliebenen `.recording` (s. `handlePressed()`) KEINEN
+    /// Weg mehr zurück außer einem erneuten Tastendruck. `guard session == .recording` ist reine
+    /// Verteidigung: Normalerweise ist der Watchdog längst über `beendeAufnahmeWatchdog()`
+    /// abgebrochen, bevor er hier ankommt, sobald die Aufnahme regulär endet.
+    private func aufnahmeWegenUeberschreitungAbbrechen() async {
+        guard session == .recording else { return }
+        _ = try? await recorder.stop()
+        session = .failed("Aufnahme abgebrochen — Taste nicht losgelassen?")
+    }
+
     // MARK: - Tastendruck
 
     private func handlePressed() async {
+        // C1 (Review M4, Critical): Verliert der Koordinator ein `.released` (macOS schaltet den
+        // CGEventTap kurz ab — `FnKeyMonitor` macht ihn selbst wieder scharf, aber das Ereignis,
+        // das GENAU in dieses Fenster fiel, ist unwiederbringlich weg), bleibt `session` auf
+        // `.recording` hängen, während der Recorder TATSÄCHLICH noch aufnimmt. Ein erneuter
+        // Tastendruck darf dann NICHT einfach `recorder.start()` aufrufen — das würde (ohne den
+        // zusätzlichen Guard in `AVAudioEngineRecorder.start()`, s. dort) entweder still
+        // fehlschlagen oder, schlimmer, dieselbe Aufnahme unbemerkt weiterlaufen lassen: Der
+        // nächste `stop()` läge dann die GESAMTE Zwischenzeit (Telefonate, Raumgespräche) als
+        // Diktat vor. Deshalb: eine verwaiste Aufnahme zuerst wegwerfen, dann sauber neu starten.
+        if session == .recording {
+            beendeAufnahmeWatchdog()
+            _ = try? await recorder.stop()
+        }
+
         do {
             try await recorder.start()
         } catch AudioRecorderError.microphoneDenied {
@@ -162,10 +234,12 @@ public final class DictationCoordinator {
         Task { [client] in try? await client.preload() }
 
         session = .recording
+        starteAufnahmeWatchdog()
     }
 
     private func handleReleased() async {
         guard session == .recording else { return }
+        beendeAufnahmeWatchdog()
 
         let recording: AudioRecording
         do {

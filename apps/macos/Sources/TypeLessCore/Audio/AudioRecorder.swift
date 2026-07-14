@@ -4,6 +4,10 @@ public enum AudioRecorderError: Error, Equatable {
     case microphoneDenied
     case notRecording
     case engineFailed(String)
+    /// C1 (Review M4): `start()`, während der Recorder bereits aktiv aufnimmt (`.laeuft`). Vorher
+    /// ein stiller No-Op (der alte Guard `zustand == .gestoppt` deckte `.laeuft` und `.startet`
+    /// gleich ab) — genau das war die Wurzel des Datenlecks, s. Kommentar in `start()`.
+    case alreadyRecording
 }
 
 /// Ergebnis einer Aufnahme.
@@ -109,6 +113,22 @@ public actor AVAudioEngineRecorder: AudioRecorder {
     }
 
     public func start() async throws {
+        // C1 (Review M4): `.laeuft` bekommt jetzt eine EIGENE Antwort — ein lauter Fehlschlag
+        // statt des bisherigen stillen `return`, das `.startet` UND `.laeuft` gleich behandelte.
+        // Szenario: Der Koordinator verliert ein `.released`-Ereignis (macOS schaltet den
+        // CGEventTap kurz ab, s. `FnKeyMonitor.handle`), `session` bleibt auf `.recording`
+        // hängen, während dieser Actor hier tatsächlich noch `.laeuft`. Drückt der Nutzer erneut,
+        // rief `handlePressed()` bisher einfach `start()` erneut auf — der alte Guard griff
+        // lautlos, kein Fehler, kein Tap, NICHTS passierte, aber `handlePressed()` setzte
+        // `session` trotzdem auf `.recording`, als sei eine neue Aufnahme gestartet. Tatsächlich
+        // lief dieselbe, allererste Aufnahme unbemerkt weiter — der nächste `stop()` hätte dann
+        // die GESAMTE Zwischenzeit (Telefonate, Raumgespräche) als Diktat ausgeliefert. Diese
+        // zweite, unabhängige Verteidigungslinie direkt am Recorder greift selbst dann, wenn der
+        // Aufrufer (`DictationCoordinator.handlePressed()`, s. dort) die verwaiste Aufnahme aus
+        // irgendeinem Grund nicht vorher verworfen hat. `.startet` bleibt bewusst unverändert
+        // (stilles `return`, s. Review-Finding 1 zu Task 2 direkt unten) — das ist die etablierte
+        // Reentrancy-Bremse für zwei einander überlappende `start()`-Versuche, kein Datenleck.
+        guard zustand != .laeuft else { throw AudioRecorderError.alreadyRecording }
         guard zustand == .gestoppt else { return }
 
         // Reservierung *vor* dem ersten `await` (Review-Finding 1 zu Task 2): Zwischen der
