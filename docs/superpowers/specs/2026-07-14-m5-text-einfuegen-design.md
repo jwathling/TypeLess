@@ -72,23 +72,45 @@ Fn-Loslassen ─▶ Aufnahme → Engine (~6 s) → fertiger Text
                     unberührt                                Zwischenablage — ⌘V"
 ```
 
-### Die vier Bedingungen fürs direkte Einfügen
+### Die fünf Bedingungen fürs direkte Einfügen
 
-Alle vier müssen erfüllt sein, sonst greift die Zwischenablage:
+Alle fünf müssen erfüllt sein, sonst greift die Zwischenablage:
 
-1. **Bedienungshilfen erteilt.** Ohne dieses Recht kann TypeLess keine Tastatur-Ereignisse
-   erzeugen. (Wird beim Start angefordert, s. u.)
+1. **Bedienungshilfen erteilt** — und **Secure Event Input nicht aktiv**. Ohne das Recht kann
+   TypeLess keine Tastatur-Ereignisse erzeugen. Und ist Secure Event Input an (Terminal →
+   „Sichere Tastatureingabe", 1Password u. Ä.), verwirft macOS synthetische Tastendrücke
+   **unabhängig** vom Recht — das Tippen verpufft dann wirkungslos. (Nachgetragen nach dem
+   Abschluss-Review: Ohne diese Prüfung wäre das Diktat **spurlos weg** — weder eingefügt noch
+   in der Zwischenablage —, bei zufriedener Anzeige.)
 2. **Dieselbe App wie beim Fn-Druck.** Verglichen wird die Prozesskennung (PID) der vordersten
    App, gemerkt beim Fn-Druck des **jeweiligen** Diktats.
-3. **Ein beschreibbares Textfeld hat den Fokus.** Über die AX-Schnittstelle erfragt. Deckt den
+3. **Dasselbe Textfeld wie beim Fn-Druck.** Verglichen wird die **Identität** des fokussierten
+   AX-Elements — **nie sein Inhalt** (s. „Datenschutz"). Entscheidung des Anwenders,
+   nachgetragen nach dem Abschluss-Review: Ohne diese Bedingung genügte die gleiche App, und ein
+   ⌘L während der Wartezeit ließe das Diktat in der **Adressleiste** des Browsers landen (oder in
+   Mail im Betreff statt im Rumpf). Das entspricht nicht dem, was der Anwender wollte: *„Wenn ich
+   diktiere, muss ich mit dem Cursor schon in irgendein Textfeld geklickt haben. Dort soll der
+   Text dann eingefügt werden."*
+   **Bewusst akzeptierter Preis:** Manche Apps bauen ihre AX-Elemente im Hintergrund neu, ohne
+   dass der Anwender etwas tut. Dann weicht TypeLess gelegentlich **unnötig** auf die
+   Zwischenablage aus. Das ist der harmlosere Fehler; der umgekehrte (Diktat in der Adressleiste)
+   ist der ärgerlichere. **Offen bis zur Handprobe:** wie oft das in echten Apps (Safari, Chrome,
+   Slack, Mail) über die ~6 s Wartezeit hinweg passiert. Tritt es häufig auf, ist direktes
+   Einfügen dort faktisch tot und die Bedingung muss nachjustiert werden.
+4. **Ein beschreibbares Textfeld hat den Fokus.** Über die AX-Schnittstelle erfragt. Deckt den
    Fall ab, dass der Anwender zwar in derselben App ist, aber gar nicht in einem Textfeld steht.
-4. **Es ist kein Passwortfeld** (`AXSecureTextField`). In ein Passwortfeld tippt TypeLess
-   **grundsätzlich nicht**.
+5. **Es ist kein Passwortfeld** (AX-Subrolle `AXSecureTextField`). In ein Passwortfeld tippt
+   TypeLess **grundsätzlich nicht**.
+   **Bekannte Grenze:** Apps mit lückenhafter AX-Umsetzung melden für ihr Passwortfeld unter
+   Umständen **gar keine** Subrolle — dann sieht TypeLess ein normales Textfeld. Schließen ließe
+   sich das nur, indem man den **Inhalt** des Feldes läse, und genau das schließt das
+   Datenschutz-Versprechen aus. Die Lücke ist der Preis dieser Zusicherung, keine Nachlässigkeit.
 
-Bedingung 3 ist zugleich die Antwort auf ein Problem, das sonst unlösbar wäre: Ob eine App eine
+Bedingung 4 ist zugleich die Antwort auf ein Problem, das sonst unlösbar wäre: Ob eine App eine
 synthetische Eingabe **hinterher** geschluckt hat, lässt sich nicht zuverlässig feststellen —
-`CGEventPost` gibt keine Rückmeldung. Also wird **vorher** gefragt, ob dort überhaupt ein
-Textfeld ist. Das ist die ehrlichere Prüfung, und sie deckt die praktisch relevanten Fälle ab.
+`CGEventPost` ist in Apples Header als `void` deklariert und gibt **keinerlei** Rückmeldung. Ein
+ausbleibender Fehler ist also **keine** Bestätigung, dass der Text angekommen ist. Deshalb wird
+**vorher** gefragt statt hinterher gehofft.
 
 ---
 
