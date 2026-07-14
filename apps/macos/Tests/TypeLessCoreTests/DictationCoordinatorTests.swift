@@ -1401,3 +1401,42 @@ func jedesDiktatPruftSeinenEigenenGemerktenFokus() async throws {
 
     await coordinator.stop()
 }
+
+// MARK: - M1 (Abschluss-Review M5, Minor): leerer Text ist kein Erfolg
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func leererTextAusDerEngineWirdGemeldetUndNichtAlsErfolgVerkauft() async throws {
+    // M1 (Abschluss-Review M5): Liefert die Engine einen LEEREN Text (der Anwender hat nichts
+    // Verständliches gesagt; das Mikrofon nahm nur Rauschen auf, an dem das Stille-Gate nicht
+    // anschlug), lief das bis M5 als `.eingefuegt` durch und endete auf `.idle` — der Anwender
+    // sah damit exakt dasselbe wie nach einem GEGLÜCKTEN Diktat: nichts. Ohne Overlay und ohne
+    // Ton ist das Menüsymbol seine einzige Rückmeldung; sie muss diesen Unterschied machen.
+    //
+    // Es geht dabei kein Text verloren (es gibt keinen) — deshalb bleibt die Zwischenablage
+    // unangetastet, und es wird auch nichts getippt.
+    let hotkey = FakeHotkey()
+    let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter()
+    let coordinator = makeCoordinator(
+        hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
+        client: DictationClient(ergebnis: .success(ergebnis(""))),
+        pasteboard: pasteboard, inserter: inserter)
+    await coordinator.start()
+
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+    await warteBis { if case .failed = coordinator.session { return true }; return false }
+
+    #expect(coordinator.session == .failed("Nichts erkannt"),
+            """
+            leerer Text darf NICHT wie ein geglücktes Diktat aussehen (.idle) — der Anwender \
+            hat keine andere Rückmeldung als das Menüsymbol
+            """)
+    #expect(inserter.getippt.isEmpty, "es gibt nichts zu tippen")
+    #expect(pasteboard.geschrieben.isEmpty,
+            "die Zwischenablage bleibt unangetastet — der alte Inhalt ist besser als Leere")
+
+    await coordinator.stop()
+}
