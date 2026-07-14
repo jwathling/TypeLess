@@ -394,6 +394,11 @@ public final class DictationCoordinator {
     private enum Zustellung: Equatable {
         case eingefuegt
         case inZwischenablage
+        /// Die Engine lieferte einen LEEREN Text (M1, Abschluss-Review M5): Der Anwender hat
+        /// nichts Verständliches gesagt, oder das Mikrofon nahm nur Rauschen auf, aus dem das
+        /// Stille-Gate nichts machen konnte. Es gibt nichts zuzustellen — aber es ist auch kein
+        /// geglücktes Diktat.
+        case nichtsErkannt
         case fehler(String)
     }
 
@@ -466,8 +471,13 @@ public final class DictationCoordinator {
                                  target: InsertionTarget,
                                  inserter: TextInserter,
                                  pasteboard: Pasteboard) -> Zustellung {
-        // Leerer Text: nichts zu tun, nichts anzufassen.
-        guard !text.isEmpty else { return .eingefuegt }
+        // Leerer Text (M1, Abschluss-Review M5): nichts zu tun, nichts anzufassen — aber auch
+        // NICHT als Erfolg melden. Bis M5 lief das als `.eingefuegt` durch und endete auf `.idle`:
+        // Der Anwender sah damit exakt dasselbe wie nach einem geglückten Diktat — nämlich nichts.
+        // Ohne Overlay und ohne Ton ist das Menüsymbol seine einzige Rückmeldung; es muss den
+        // Unterschied zwischen „ist eingefügt" und „da war nichts" machen können. Es geht dabei
+        // kein Text verloren (es gibt keinen), und die Zwischenablage bleibt unangetastet.
+        guard !text.isEmpty else { return .nichtsErkannt }
 
         // Bedingung 2: dieselbe App wie beim Fn-Druck.
         guard let zielApp, target.vordersteApp() == zielApp else {
@@ -524,6 +534,7 @@ public final class DictationCoordinator {
         switch zustellung {
         case .eingefuegt: session = .idle
         case .inZwischenablage: session = .inZwischenablage
+        case .nichtsErkannt: session = .failed("Nichts erkannt")
         case let .fehler(grund): session = .failed(grund)
         }
     }
