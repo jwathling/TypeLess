@@ -1,6 +1,6 @@
 import AVFoundation
 import AppKit
-import ApplicationServices
+@preconcurrency import ApplicationServices
 import Foundation
 import IOKit.hid
 
@@ -129,14 +129,14 @@ public struct SystemPermissionsService: PermissionsService {
         // `kAXTrustedCheckOptionPrompt: true` ist der Unterschied zwischen "prüfen" und
         // "anfordern" — nur damit zeigt macOS den Dialog und nimmt TypeLess in die Liste auf.
         //
-        // Der C-Import bringt die Konstante als globale `Unmanaged<CFString>`-Variable mit, die
-        // der Compiler unter Swift 6 als nicht nebenläufigkeitssicher ablehnt — selbst ein
-        // lokales `nonisolated(unsafe)` greift hier nicht, weil schon der lesende Zugriff auf die
-        // globale Variable selbst beanstandet wird. Der Bezeichner ist laut Apple-Dokumentation
-        // mit seinem eigenen Namen als String-Wert definiert; das umgeht den Zugriff auf die
-        // globale Variable komplett, statt die Prüfung mit `@preconcurrency` pauschal
-        // abzuschalten.
-        let options = ["AXTrustedCheckOptionPrompt": true]
+        // Die Konstante kommt als globale `Unmanaged<CFString>`-Variable aus dem C-Header, den
+        // Apple noch nicht für Swift 6 auditiert hat — deshalb `@preconcurrency` am Import (s.
+        // oben). Ohne das lehnt der Compiler schon den lesenden Zugriff ab. Den Wert
+        // ("AXTrustedCheckOptionPrompt") stattdessen als String-Literal abzuschreiben wäre
+        // verlockend und funktionierte heute auch — es risse aber eine stille Bruchstelle auf,
+        // falls Apple die Konstante je ändert: Der Compiler merkte davon nichts, und der Dialog
+        // bliebe einfach aus. Lieber der echte Bezeichner.
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
         return AXIsProcessTrustedWithOptions(options as CFDictionary)
     }
 }
