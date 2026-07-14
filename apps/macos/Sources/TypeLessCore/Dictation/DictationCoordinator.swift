@@ -75,6 +75,15 @@ public final class DictationCoordinator {
     /// Diktier-Taste).
     private var zaehlerBeimDruck: UInt32 = 0
 
+    /// I3 (Review M4, Important): Unterscheidet ein ERWARTETES Streamende (`stopHotkey()` hat es
+    /// selbst ausgelöst) von einem UNERWARTETEN (der Hotkey ist tot). Der reale `FnKeyMonitor`
+    /// wirft bei fehlender Berechtigung „Eingabeüberwachung" NICHT synchron — der Fehler passiert
+    /// auf dem Hotkey-Thread und endet dort nur in `continuation.finish()` (s. Kommentar dort).
+    /// Ohne diese Unterscheidung sieht `start()` in beiden Fällen denselben normal endenden
+    /// Stream und kann einen toten Hotkey nicht von einem absichtlich gestoppten unterscheiden.
+    /// Läuft stets auf dem MainActor (wie der Rest des Koordinators) — kein Lock nötig.
+    private var erwarteteHotkeyBeendigung = false
+
     public init(hotkey: HotkeyMonitor,
                 recorder: AudioRecorder,
                 client: SidecarClient,
@@ -99,19 +108,27 @@ public final class DictationCoordinator {
 
     public func start() async {
         stopHotkey()
-        do {
-            let stream = try hotkey.start()
-            hotkeyTask = Task { [weak self] in
-                for await event in stream {
-                    guard let self else { return }
-                    switch event {
-                    case .pressed: await self.handlePressed()
-                    case .released: await self.handleReleased()
-                    }
+        // Erst NACH `stopHotkey()` zurücksetzen — das setzt es (absichtlich) selbst auf `true`.
+        erwarteteHotkeyBeendigung = false
+
+        let stream = hotkey.start()
+        hotkeyTask = Task { [weak self] in
+            for await event in stream {
+                guard let self else { return }
+                switch event {
+                case .pressed: await self.handlePressed()
+                case .released: await self.handleReleased()
                 }
             }
-        } catch {
-            session = .failed("Hotkey inaktiv — Eingabeüberwachung fehlt")
+            // I3 (Review M4, Important): Der Stream ist zu Ende. `FnKeyMonitor.start()` wirft
+            // real NIE synchron (s. `HotkeyMonitor`-Kommentar) — der einzige Fehlerfall (fehlende
+            // Eingabeüberwachung, `CGEvent.tapCreate` liefert nil) endet HIER, als leerer Stream,
+            // auf einem anderen Thread. Ohne diese Auswertung stünde im Menü „Bereit", obwohl der
+            // Hotkey tot ist. Endet der Stream, OHNE dass `stopHotkey()` ihn absichtlich beendet
+            // hat, ist der Hotkey tot — das deckt auch den Fall ab, dass er später (nach
+            // erfolgreichem Start) unerwartet endet.
+            guard let self, !self.erwarteteHotkeyBeendigung else { return }
+            self.session = .failed("Hotkey inaktiv — Eingabeüberwachung fehlt")
         }
     }
 
@@ -160,6 +177,9 @@ public final class DictationCoordinator {
     }
 
     private func stopHotkey() {
+        // I3 (Review M4, Important): markiert das gleich folgende Streamende als ERWARTET —
+        // s. Kommentar bei `erwarteteHotkeyBeendigung` und in `start()`.
+        erwarteteHotkeyBeendigung = true
         hotkeyTask?.cancel()
         hotkeyTask = nil
         hotkey.stop()
