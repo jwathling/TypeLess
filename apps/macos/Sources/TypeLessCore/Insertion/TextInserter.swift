@@ -55,6 +55,30 @@ public struct CGEventTextInserter: TextInserter {
     /// **stillschweigend abgeschnitten** — das Diktat wäre teilweise weg, ohne jede Fehlermeldung.
     static let haeppchenGroesse = 20
 
+    /// **Tragende Invariante, keine Geschmacksfrage** (I1, Abschluss-Review M5, Important).
+    ///
+    /// Dieser Einfüger postet `keyDown`-Ereignisse. Gleichzeitig zählt ``SystemKeyDownCounter``
+    /// Tastendrücke — er ist die Wache gegen „Fn als Modifier benutzt": Steigt er zwischen
+    /// Fn-Druck und Fn-Loslassen, verwirft `DictationCoordinator` das Diktat **kommentarlos**.
+    /// Zählte dieser Zähler die hier geposteten Ereignisse mit, hieße das: Diktat 1 wird fertig
+    /// und **tippt**, während der Anwender Fn für Diktat 2 schon hält → der Zähler steigt →
+    /// Diktat 2 wird stumm weggeworfen, der Anwender hat umsonst gesprochen. Das dritte Ergebnis,
+    /// das M5 ausschließt — und keine Anzeige würde es verraten.
+    ///
+    /// **Gemessen** (Abschluss-Review M5): Ob der Zähler ein selbst gepostetes Ereignis
+    /// mitzählt, hängt **allein an dieser Tap-Wahl** — die `stateID` der Quelle (auch
+    /// `.privateState`) ändert nichts daran. Auf `.cgAnnotatedSessionEventTap` bleiben beide
+    /// Zähler (`.hidSystemState` und `.combinedSessionState`) stehen; auf `.cghidEventTap`
+    /// steigen **beide** um die Zahl der geposteten Ereignisse (auf HID-Ebene injizierte
+    /// Ereignisse sind von echter Hardware per Konstruktion nicht unterscheidbar). Die volle
+    /// Tabelle steht bei ``KeyDownCounter``.
+    ///
+    /// Deshalb: **Diese Konstante darf nicht auf `.cghidEventTap` wechseln** — auch nicht als
+    /// schneller Reflex, falls eine App annotierte Session-Ereignisse schluckt. Wer das doch
+    /// braucht, muss vorher die Fn-als-Modifier-Wache anders bauen (z. B. die eigenen geposteten
+    /// Ereignisse mitzählen und herausrechnen). Ein Test bewacht diesen Wert.
+    static let postTap: CGEventTapLocation = .cgAnnotatedSessionEventTap
+
     public init() {}
 
     public func insert(_ text: String) throws {
@@ -90,8 +114,10 @@ public struct CGEventTextInserter: TextInserter {
             ereignisse.append(hoch)
         }
 
+        // `postTap` ist bewusst eine benannte Konstante und kein Literal — an ihr hängt die
+        // Fn-als-Modifier-Wache (s. dort und ``KeyDownCounter``).
         for ereignis in ereignisse {
-            ereignis.post(tap: .cgAnnotatedSessionEventTap)
+            ereignis.post(tap: Self.postTap)
         }
     }
 
