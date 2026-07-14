@@ -1,16 +1,26 @@
 import SwiftUI
 import TypeLessCore
 
-/// Der Inhalt des Menüleisten-Menüs. Zeigt nur an, was ``AppState`` sagt — keine Logik.
-/// Kein ``@Bindable``: Das Menü schreibt nichts zurück, es liest nur. ``@Observable`` sorgt
-/// dafür, dass es sich bei jeder Zustandsänderung neu zeichnet.
+/// Der Inhalt des Menüleisten-Menüs. Zeigt nur an, was ``AppState`` und
+/// ``DictationCoordinator`` sagen — keine Logik. Kein ``@Bindable``: Das Menü schreibt nichts
+/// zurück, es liest nur. ``@Observable`` sorgt dafür, dass es sich bei jeder Zustandsänderung
+/// neu zeichnet.
 struct MenuContent: View {
     let state: AppState
+    let dictation: DictationCoordinator
 
     var body: some View {
-        Text(engineText)
+        Text(statusText)
 
         Divider()
+
+        // Der Hotkey ist nutzlos, wenn macOS die Fn-Taste selbst belegt. Das sagen wir, statt
+        // den Nutzer rätseln zu lassen, warum ständig Emojis aufpoppen.
+        if FnKeyMonitor.fnKeyOpensEmojiPicker() {
+            Text("⚠ Fn öffnet den Emoji-Picker")
+            Text("   Tastatur-Einstellungen → „Beim Drücken der 🌐-Taste“ → „Keine Aktion“")
+            Divider()
+        }
 
         ForEach(Permission.allCases, id: \.self) { permission in
             Button {
@@ -28,22 +38,29 @@ struct MenuContent: View {
         }
 
         // Läuft ausschließlich über NSApplication.terminate(): applicationShouldTerminate(_:) in
-        // AppDelegate (TypeLessApp.swift) fängt das ab und wartet dort async auf state.shutdown()
-        // — derselbe Weg wie bei Cmd+Q oder „Beenden" im Dock. Ein zweiter, hier lokaler Aufruf von
-        // state.shutdown() würde nur denselben Zustand doppelt (und ohne Not vor dem eigentlichen
-        // Beenden-Ereignis) durchlaufen.
+        // AppDelegate (TypeLessApp.swift) fängt das ab und wartet dort async zuerst auf
+        // dictation.stop(), dann auf state.shutdown() — derselbe Weg wie bei Cmd+Q oder
+        // „Beenden" im Dock. Ein zweiter, hier lokaler Aufruf würde nur denselben Zustand
+        // doppelt (und ohne Not vor dem eigentlichen Beenden-Ereignis) durchlaufen.
         Button("TypeLess beenden") {
             NSApplication.shared.terminate(nil)
         }
     }
 
-    /// Der Zustand in einem Satz — bei einem Fehler mit dem Grund im Klartext.
-    private var engineText: String {
-        switch state.engine {
-        case .stopped: "Engine: gestoppt"
-        case .starting: "Engine: startet …"
-        case .ready: "Engine: bereit"
-        case let .failed(reason): "Engine-Fehler: \(reason)"
+    /// Der Diktat-Zustand hat Vorrang: Während der Aufnahme oder Verarbeitung interessiert die
+    /// Engine nicht — das sähe der Nutzer ohnehin nur als irreführende Ablenkung.
+    private var statusText: String {
+        switch dictation.session {
+        case .recording: "🔴 Nimmt auf …"
+        case .processing: "Verarbeite …"
+        case let .failed(grund): "Fehler: \(grund)"
+        case .idle:
+            switch state.engine {
+            case .ready: "Bereit — Fn halten zum Diktieren"
+            case .starting: "Engine startet …"
+            case .stopped: "Engine: gestoppt"
+            case let .failed(grund): "Engine-Fehler: \(grund)"
+            }
         }
     }
 }
