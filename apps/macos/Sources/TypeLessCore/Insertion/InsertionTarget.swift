@@ -7,6 +7,15 @@ public enum Fokusziel: Sendable, Equatable {
     /// Ein Textfeld, in das geschrieben werden darf — hier und nur hier wird getippt.
     case beschreibbaresTextfeld
     /// Ein Passwortfeld. TypeLess tippt dort **grundsätzlich nicht** hinein.
+    ///
+    /// **Bekannte Grenze, ehrlich benannt:** Diese Erkennung hängt daran, dass die App ihr Feld
+    /// über die AX-Subrolle `AXSecureTextField` ausweist. Apps mit lückenhafter
+    /// AX-Umsetzung (z. B. manche Electron-/Cross-Platform-Apps) melden für ihr Passwortfeld
+    /// unter Umständen **gar keine** Subrolle — dann sieht TypeLess ein normales Textfeld und
+    /// würde dort einfügen. Schließen ließe sich das nur, indem man den **Inhalt** des Feldes
+    /// läse, und genau das ist im Datenschutz-Versprechen dieses Projekts ausgeschlossen. Die
+    /// Lücke ist also keine Nachlässigkeit, sondern der Preis dieser Zusicherung — sie steht hier,
+    /// damit niemand später mehr Sicherheit annimmt, als diese Schnittstelle liefern kann.
     case passwortfeld
     /// Irgendetwas anderes hat den Fokus (Liste, Knopf, Leinwand) — oder gar nichts.
     case keinTextfeld
@@ -52,7 +61,17 @@ public struct AXInsertionTarget: InsertionTarget {
     /// Mit dieser Naht ist die Regel unabhängig vom Zustand der Maschine beweisbar.
     private let istVertrauenswuerdig: @Sendable () -> Bool
 
-    public init(istVertrauenswuerdig: @escaping @Sendable () -> Bool = { AXIsProcessTrusted() }) {
+    public init() {
+        istVertrauenswuerdig = { AXIsProcessTrusted() }
+    }
+
+    /// **Nur für Tests** — bewusst NICHT `public`: Wäre dieser Init von außerhalb des Moduls
+    /// erreichbar, könnte die App-Schicht bei der Verdrahtung versehentlich
+    /// `AXInsertionTarget(istVertrauenswuerdig: { true })` bauen (etwa aus dem Testcode kopiert)
+    /// und damit die Sicherheitsprüfung im Produktivbetrieb aushebeln — kein Test würde das je
+    /// bemerken, weil er denselben Konstruktor unauffällig weiterbenutzte. Gleiche Bauart wie
+    /// `AVAudioEngineRecorder.init(mikrofonPruefung:)`, aus demselben Grund.
+    init(istVertrauenswuerdig: @escaping @Sendable () -> Bool) {
         self.istVertrauenswuerdig = istVertrauenswuerdig
     }
 
