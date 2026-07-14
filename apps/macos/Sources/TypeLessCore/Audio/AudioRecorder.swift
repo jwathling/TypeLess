@@ -18,13 +18,66 @@ public enum AudioRecorderError: Error, Equatable {
 /// das getan). Im Normalfall `0`. Was der Aufrufer daraus macht (Fehler anzeigen, Aufnahme
 /// verwerfen, nur loggen), ist bewusst nicht hier entschieden — aber er kann es nicht mehr
 /// *nicht wissen*.
+///
+/// `geraeteWechsel` meldet dieselbe Art Problem für einen anderen Auslöser (I2, Review M4,
+/// Important): Verbinden sich während der Aufnahme die AirPods (oder wackelt Bluetooth), stoppt
+/// `AVAudioEngine` sich bei einem Konfigurationswechsel SELBST — ab da kommen keine Puffer mehr,
+/// aber `stop()` liefert trotzdem brav, was bis dahin da war (nicht leer, nicht stumm, über der
+/// Mindestdauer). Ohne dieses Feld ginge die halbe Aufnahme unbemerkt an die Engine.
 public struct AudioRecording: Sendable, Equatable {
     public let werte: [Float]
     public let verloreneHaeppchen: Int
+    public let geraeteWechsel: Bool
 
-    public init(werte: [Float], verloreneHaeppchen: Int = 0) {
+    public init(werte: [Float], verloreneHaeppchen: Int = 0, geraeteWechsel: Bool = false) {
         self.werte = werte
         self.verloreneHaeppchen = verloreneHaeppchen
+        self.geraeteWechsel = geraeteWechsel
+    }
+}
+
+/// Beobachtet `AVAudioEngine`-Konfigurationswechsel (I2, Review M4, Important) — threadsicher
+/// und unabhängig vom Actor-Executor: Der `NotificationCenter`-Callback für
+/// `.AVAudioEngineConfigurationChange` läuft auf einem von Apple nicht spezifizierten Thread,
+/// nicht notwendigerweise dem Executor von ``AVAudioEngineRecorder``.
+///
+/// `internal` (nicht `private`), aus demselben Grund wie ``AVAudioEngineRecorder/Sammler``:
+/// `AudioRecorderTests` muss den Mechanismus direkt prüfen können, ohne echte Audio-Hardware zu
+/// starten (nur eine `AVAudioEngine`-Instanz konstruieren reicht, ganz ohne `.start()` — der
+/// Notification-Name ist an die OBJEKTIDENTITÄT des `AVAudioEngine`-Objekts gebunden, nicht an
+/// dessen Laufzustand).
+final class GeraeteWechselBeobachter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var gesetzt = false
+    private var token: NSObjectProtocol?
+
+    /// Beginnt, auf Konfigurationswechsel der übergebenen Engine zu achten. Ein eventuell noch
+    /// laufender älterer Beobachtungsauftrag wird zuerst beendet (`nichtMehrBeobachten()`).
+    func beobachten(_ engine: AVAudioEngine) {
+        nichtMehrBeobachten()
+        token = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
+        ) { [self] _ in setzen() }
+    }
+
+    func nichtMehrBeobachten() {
+        lock.lock()
+        let alterToken = token
+        token = nil
+        lock.unlock()
+        if let alterToken { NotificationCenter.default.removeObserver(alterToken) }
+    }
+
+    private func setzen() {
+        lock.lock(); gesetzt = true; lock.unlock()
+    }
+
+    /// Liest den aktuellen Stand und setzt ihn zurück — eine Aufnahme darf den Konfigurations-
+    /// wechsel einer VORHERIGEN Aufnahme nicht erben.
+    func lesenUndZuruecksetzen() -> Bool {
+        lock.lock()
+        defer { gesetzt = false; lock.unlock() }
+        return gesetzt
     }
 }
 
@@ -101,6 +154,10 @@ public actor AVAudioEngineRecorder: AudioRecorder {
         }
     }
     private let sammler = Sammler()
+
+    /// I2 (Review M4, Important): erkennt einen Geräteumschwenk (AirPods verbinden sich,
+    /// Bluetooth wackelt) WÄHREND der Aufnahme. S. ``GeraeteWechselBeobachter``.
+    private let geraeteWechselBeobachter = GeraeteWechselBeobachter()
 
     public init() {
         mikrofonPruefung = Self.mikrofonErlaubt
@@ -207,6 +264,12 @@ public actor AVAudioEngineRecorder: AudioRecorder {
                 throw AudioRecorderError.engineFailed(error.localizedDescription)
             }
 
+            // I2 (Review M4, Important): Erst JETZT beobachten, nicht früher — vorher existiert
+            // noch keine "Aufnahme", deren Konfigurationswechsel uns interessieren würde. Ein
+            // eventuell übrig gebliebener Stand einer VORHERIGEN Aufnahme wird dabei verworfen
+            // (`beobachten()` ruft intern `nichtMehrBeobachten()` zuerst).
+            geraeteWechselBeobachter.beobachten(engine)
+
             zustand = .laeuft
         } catch {
             // Jeder Fehlerpfad oben lässt den Recorder wieder startbar zurück, statt
@@ -248,6 +311,12 @@ public actor AVAudioEngineRecorder: AudioRecorder {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
 
+        // I2 (Review M4, Important): NACH engine.stop() lesen — so ist garantiert kein
+        // Konfigurationswechsel mehr unterwegs, der den Stand noch ändern könnte. Setzt den
+        // Beobachter zurück, damit eine künftige Aufnahme nicht den Stand DIESER hier erbt.
+        geraeteWechselBeobachter.nichtMehrBeobachten()
+        let geraeteWechsel = geraeteWechselBeobachter.lesenUndZuruecksetzen()
+
         let (gesammelt, haeppchenFehler) = sammler.leeren()
         var ergebnis = gesammelt
 
@@ -264,7 +333,8 @@ public actor AVAudioEngineRecorder: AudioRecorder {
         }
         self.resampler = nil
 
-        return AudioRecording(werte: ergebnis, verloreneHaeppchen: haeppchenFehler)
+        return AudioRecording(werte: ergebnis, verloreneHaeppchen: haeppchenFehler,
+                              geraeteWechsel: geraeteWechsel)
     }
 
     private static func mikrofonErlaubt() async -> Bool {

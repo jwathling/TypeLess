@@ -862,3 +862,35 @@ func normalesDiktatBleibtUnberuehrtWennDerZaehlerWaehrendDerAufnahmeNichtSteigt(
 
     await coordinator.stop()
 }
+
+// MARK: - I2 (Review M4, Important): Geräteumschwenk während der Aufnahme kürzt sie nicht stillschweigend
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func geraetewechselWaehrendDerAufnahmeWirdAlsFehlerGemeldetUndNichtVerarbeitet() async throws {
+    // I2 (Review M4, Important): Verbinden sich während des Diktats die AirPods (oder wackelt
+    // Bluetooth), stoppt AVAudioEngine sich bei einem Konfigurationswechsel SELBST — ab da
+    // kommen keine Puffer mehr, aber stop() liefert trotzdem brav, was bis dahin da war:
+    // verloreneHaeppchen == 0, nicht stumm, über der Mindestdauer. Ohne diese Prüfung ginge die
+    // HALBE Aufnahme unbemerkt an die Engine — der Nutzer hielte die Transkription für schlecht,
+    // statt den Abbruch zu bemerken. Dieselbe Behandlung wie verloreneHaeppchen.
+    let hotkey = FakeHotkey()
+    let pasteboard = SpyPasteboard()
+    let client = DictationClient(ergebnis: .success(ergebnis("darf nicht kommen")))
+    let coordinator = makeCoordinator(
+        hotkey: hotkey,
+        recorder: FakeRecorder(samples: sprache(), geraeteWechsel: true),
+        client: client, pasteboard: pasteboard)
+    await coordinator.start()
+
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+    await warteBis { if case .failed = coordinator.session { return true }; return false }
+
+    #expect(coordinator.session == .failed("Audiogerät hat gewechselt — bitte erneut versuchen"))
+    #expect(client.processCount == 0, "eine unbrauchbar gewordene Aufnahme darf die Engine gar nicht erst behelligen")
+    #expect(pasteboard.geschrieben.isEmpty, "die Zwischenablage darf nie überschrieben werden")
+
+    await coordinator.stop()
+}
