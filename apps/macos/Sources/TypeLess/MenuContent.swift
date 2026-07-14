@@ -27,6 +27,17 @@ struct MenuContent: View {
             Divider()
         }
 
+        // Ohne Bedienungshilfen kann NIE direkt eingefügt werden — der Text landet dann immer in
+        // der Zwischenablage. TypeLess bleibt voll benutzbar, aber es tut nicht so, als sei alles
+        // in Ordnung (Lektion aus der M4-Handprobe: „Bereit", während der Hotkey tot war).
+        if state.einfuegenBrauchtBedienungshilfen {
+            Text("⚠ Bedienungshilfen fehlen — Text landet in der Zwischenablage")
+            Button("   → Bedienungshilfen erlauben, dann TypeLess neu starten") {
+                state.openSettings(for: .accessibility)
+            }
+            Divider()
+        }
+
         // Der Hotkey ist nutzlos, wenn macOS die Fn-Taste selbst belegt. Das sagen wir, statt
         // den Nutzer rätseln zu lassen, warum ständig Emojis aufpoppen.
         if FnKeyMonitor.fnKeyOpensEmojiPicker() {
