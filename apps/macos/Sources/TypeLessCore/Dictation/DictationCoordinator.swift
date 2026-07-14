@@ -75,15 +75,6 @@ public final class DictationCoordinator {
     /// Diktier-Taste).
     private var zaehlerBeimDruck: UInt32 = 0
 
-    /// I3 (Review M4, Important): Unterscheidet ein ERWARTETES Streamende (`stopHotkey()` hat es
-    /// selbst ausgelöst) von einem UNERWARTETEN (der Hotkey ist tot). Der reale `FnKeyMonitor`
-    /// wirft bei fehlender Berechtigung „Eingabeüberwachung" NICHT synchron — der Fehler passiert
-    /// auf dem Hotkey-Thread und endet dort nur in `continuation.finish()` (s. Kommentar dort).
-    /// Ohne diese Unterscheidung sieht `start()` in beiden Fällen denselben normal endenden
-    /// Stream und kann einen toten Hotkey nicht von einem absichtlich gestoppten unterscheiden.
-    /// Läuft stets auf dem MainActor (wie der Rest des Koordinators) — kein Lock nötig.
-    private var erwarteteHotkeyBeendigung = false
-
     public init(hotkey: HotkeyMonitor,
                 recorder: AudioRecorder,
                 client: SidecarClient,
@@ -108,8 +99,6 @@ public final class DictationCoordinator {
 
     public func start() async {
         stopHotkey()
-        // Erst NACH `stopHotkey()` zurücksetzen — das setzt es (absichtlich) selbst auf `true`.
-        erwarteteHotkeyBeendigung = false
 
         let stream = hotkey.start()
         hotkeyTask = Task { [weak self] in
@@ -127,7 +116,16 @@ public final class DictationCoordinator {
             // Hotkey tot ist. Endet der Stream, OHNE dass `stopHotkey()` ihn absichtlich beendet
             // hat, ist der Hotkey tot — das deckt auch den Fall ab, dass er später (nach
             // erfolgreichem Start) unerwartet endet.
-            guard let self, !self.erwarteteHotkeyBeendigung else { return }
+            //
+            // N1 (Re-Review M4, Important): Die Unterscheidung „erwartet/unerwartet" hängt an der
+            // IDENTITÄT DIESER TASK, nicht an einem Instanz-Flag. Ein Flag war nachweislich falsch:
+            // `stopHotkey()` setzte es, `start()` setzte es unmittelbar danach (ohne jeden
+            // Suspension-Punkt) wieder zurück und startete die neue Task — die ALTE Task lief erst
+            // DANACH aus, sah das bereits zurückgesetzte Flag und meldete einen Hotkey-Ausfall,
+            // obwohl der Hotkey einwandfrei lief. `stopHotkey()` cancelt die Task ohnehin: Genau
+            // die abgelöste Task ist cancelled, die neue nicht — und eine wirklich gestorbene
+            // ebenfalls nicht.
+            guard let self, !Task.isCancelled else { return }
             self.session = .failed("Hotkey inaktiv — Eingabeüberwachung fehlt")
         }
     }
@@ -177,9 +175,8 @@ public final class DictationCoordinator {
     }
 
     private func stopHotkey() {
-        // I3 (Review M4, Important): markiert das gleich folgende Streamende als ERWARTET —
-        // s. Kommentar bei `erwarteteHotkeyBeendigung` und in `start()`.
-        erwarteteHotkeyBeendigung = true
+        // Das `cancel()` ist zugleich die Markierung „dieses Streamende ist ERWARTET" — der
+        // Schwanz der Task liest es über `Task.isCancelled` (N1, s. Kommentar in `start()`).
         hotkeyTask?.cancel()
         hotkeyTask = nil
         hotkey.stop()
@@ -250,11 +247,25 @@ public final class DictationCoordinator {
 
         do {
             try await recorder.start()
-        } catch AudioRecorderError.microphoneDenied {
-            session = .failed("Mikrofonzugriff verweigert")
-            return
         } catch {
-            session = .failed("Aufnahme nicht möglich: \(error)")
+            // N2 (Re-Review M4, Minor): EINE Regel, für JEDEN Fehler von `start()` — verlässt
+            // `handlePressed()` einen Fehlerpfad, ist das Mikrofon zu. Ohne diesen Stop war der
+            // schlimmste Fall dauerhaft tödlich: Wirft `start()` ein `.alreadyRecording` (der
+            // Recorder läuft in Wahrheit noch — C1-Zustand, den der Guard oben nicht sieht, weil
+            // `session` nach einem früheren Fehlschlag eben NICHT `.recording` ist), lief das
+            // Mikrofon weiter, der Watchdog wurde nie armiert (er startet erst unten), und der
+            // nächste Druck lief in genau dasselbe `.alreadyRecording`: Mikrofon dauerhaft offen,
+            // Diktat dauerhaft tot. Ein `stop()` auf einem gar nicht laufenden Recorder wirft
+            // `.notRecording` und ist folgenlos (`try?`) — das ist der Preis dafür, dass diese
+            // Regel keine Fallunterscheidung braucht. Der Zustandsautomat bleibt damit einfacher
+            // als mit einem eigenen `catch`-Zweig nur für `.alreadyRecording`: Es gibt keinen
+            // Fehlerausgang mehr, hinter dem noch ein offenes Mikrofon stehen könnte.
+            _ = try? await recorder.stop()
+            if let fehler = error as? AudioRecorderError, fehler == .microphoneDenied {
+                session = .failed("Mikrofonzugriff verweigert")
+            } else {
+                session = .failed("Aufnahme nicht möglich: \(error)")
+            }
             return
         }
 
