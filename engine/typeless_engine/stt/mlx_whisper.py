@@ -75,7 +75,7 @@ class MLXWhisperTranscriber(StreamingTranscriber):
             # folgenden Fenster — sie läuft dann bis zum Ende des Diktats durch.
             #
             # In der Handprobe zu M4 real passiert: Ein sonst sauberes Diktat endete in
-            # „beber beber beber …", hunderte Male, bis zum Schluss.
+            # „beber beber beber …“, hunderte Male, bis zum Schluss.
             #
             # `condition_on_previous_text=False` kappt die Weitergabe. Preis: Whisper verliert
             # den Kontext über Fenstergrenzen hinweg (z. B. Eigennamen, die vorher fielen). Für
