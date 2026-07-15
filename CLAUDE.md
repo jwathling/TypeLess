@@ -106,11 +106,14 @@ open apps/macos/TypeLess.app
 ```
 
 `scripts/build-app.sh` erzeugt ein echtes `.app`-Bundle (macOS vergibt Mikrofon-/
-Accessibility-Rechte an eine Bundle-Identität, nicht an ein nacktes Binary) und signiert es
-**ad-hoc** (`codesign --sign -`) — für den persönlichen Gebrauch ausreichend, aber die
-Signatur-Identität wechselt bei jedem Neubau. macOS kann deshalb nach einem Neubau **erneut**
-nach Mikrofon-/Accessibility-/Eingabeüberwachungs-Rechten fragen. Ein echtes Zertifikat gibt es
-erst in M8.
+Accessibility-Rechte an eine Bundle-**Identität**, nicht an ein nacktes Binary). Signiert wird mit
+einer **stabilen, selbst-signierten** Entwickler-Identität „TypeLess Dev", sobald sie im
+Schlüsselbund liegt — einmal anzulegen mit `bash scripts/setup-signing-identity.sh` (kein
+Apple-Konto, keine Kosten). Dadurch bleibt die Identität über **alle** Neubauten gleich und die
+Rechte werden nur **einmalig** erteilt. Fehlt die Identität, fällt das Skript auf eine Ad-hoc-
+Signatur zurück — die wechselt bei jedem Neubau, dann muss man die Rechte nach jedem Bau neu
+erteilen (der Schalter in den Einstellungen sieht dabei noch „an" aus, zeigt aber auf die alte
+Identität). Ein echtes Apple-Zertifikat für die Weitergabe an andere gibt es erst in M8.
 
 Die App startet den Sidecar selbst (spekulativ übernimmt sie eine bereits laufende Instanz statt
 eine zweite zu spawnen) und beendet einen selbst gestarteten Sidecar beim Beenden wieder mit —
