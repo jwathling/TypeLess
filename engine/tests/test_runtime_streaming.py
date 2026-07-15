@@ -116,3 +116,50 @@ async def test_streaming_fehler_faellt_auf_batch_zurueck() -> None:
     result = await rt.process_stream(_chunks(3, 16000), Mode.DIKTAT)
     # Streaming stolpert -> Rettung über den Batch-Weg, Diktat NICHT verloren.
     assert result.raw_text == "rettung per batch"
+
+
+class _LangsamerPreloadRefiner(EchoRefiner):
+    """Refiner, dessen preload spürbar dauert und seinen Abschluss vermerkt."""
+
+    def __init__(self) -> None:
+        self.preload_fertig = False
+
+    def preload(self) -> None:
+        import time
+
+        time.sleep(0.2)
+        self.preload_fertig = True
+
+
+class _TotalausfallTranscriber(StreamingTranscriber):
+    """Streaming UND Batch scheitern — der einzige Pfad, auf dem process_stream durchreicht."""
+
+    def warm_up(self) -> None: ...
+
+    def transcribe(self, audio: AudioBuffer, *, language: str | None = None) -> Transcription:
+        raise RuntimeError("Batch auch kaputt")
+
+    def stream_begin(self, *, language: str | None = None) -> None: ...
+
+    def stream_feed(self, samples: np.ndarray) -> str:
+        raise RuntimeError("Streaming kaputt")
+
+    def stream_finalize(self) -> Transcription:
+        raise RuntimeError("nie erreicht")
+
+
+@pytest.mark.anyio
+async def test_preload_wird_auch_bei_totalausfall_ausgewartet() -> None:
+    refiner = _LangsamerPreloadRefiner()
+    rt = EngineRuntime(
+        EngineConfig(stt_backend="mock", llm_backend="mock"),
+        transcriber=_TotalausfallTranscriber(),
+        refiner=refiner,
+        dictionary=DictionaryEngine({}),
+    )
+    await rt.startup()
+    with pytest.raises(RuntimeError):
+        await rt.process_stream(_chunks(2, 16000), Mode.DIKTAT)
+    # Der Preload-Thread wurde noch UNTER dem Lock zu Ende gewartet — kein Zombie, der den
+    # Refiner-Zustand nach Lock-Freigabe mutiert.
+    assert refiner.preload_fertig is True

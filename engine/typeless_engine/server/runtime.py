@@ -357,10 +357,14 @@ class EngineRuntime:
                     result = replace(result, fallback_reason=self._refiner.last_error)
                 return result
             finally:
-                if not preload_task.done():
-                    preload_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError, Exception):
-                        await preload_task
+                # Den Preload-Task IMMER auswarten statt abzubrechen: to_thread lässt sich nicht
+                # wirklich unterbrechen — ein cancel() beendet nur das Warten, während der
+                # Worker-Thread das LLM weiterlädt und den Refiner-Zustand NACH Freigabe des Locks
+                # mutieren würde (Bruch der Serialisierung). Also warten wir das Laden hier, noch
+                # unter dem Lock, zu Ende. _ResilientRefiner.preload wirft nie; der Suppress ist
+                # rein defensiv. Auf dem Erfolgspfad ist der Task längst fertig — dann ein No-op.
+                with contextlib.suppress(Exception):
+                    await preload_task
                 self._busy = False
 
     async def _consume_stream(
