@@ -25,6 +25,31 @@ _log = get_logger(__name__)
 DEFAULT_MODEL = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
 
 
+def statischer_praefix(tokenizer: Any, spec: Any) -> list[int]:
+    """Die feste Token-Folge eines Modus — Systemprompt samt Vorlage bis zum Diktattext.
+
+    Ermittelt über den LÄNGSTEN GEMEINSAMEN PRÄFIX zweier verschieden diktierter Texte: Alles vor
+    der ersten Abweichung ist der statische Teil. Das ist robust gegen Tokenizer-Eigenheiten
+    (Zusammenlegen von Zeichen über Grenzen hinweg), weil es mit echten Tokenisierungen arbeitet
+    und nicht mit dem Zerschneiden von Strings.
+    """
+    a = tokenizer.apply_chat_template(
+        spec.build_messages("Apfel"), add_generation_prompt=True, tokenize=True
+    )
+    b = tokenizer.apply_chat_template(
+        spec.build_messages("Zebra"), add_generation_prompt=True, tokenize=True
+    )
+    n = 0
+    while n < len(a) and n < len(b) and a[n] == b[n]:
+        n += 1
+    return list(a[:n])
+
+
+def beginnt_mit(voll: list[int], praefix: list[int]) -> bool:
+    """Prüft, ob ``voll`` mit ``praefix`` beginnt — der Präfix-Wächter vor jeder Cache-Nutzung."""
+    return len(voll) >= len(praefix) and list(voll[: len(praefix)]) == list(praefix)
+
+
 class MLXRefiner(Refiner):
     """Refiner auf Basis von ``mlx_lm`` (Metal, Apple Silicon)."""
 
