@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import AsyncIterator
 from typing import Annotated
 
 import numpy as np
-from fastapi import Body, FastAPI, HTTPException, Query, Response
+from fastapi import Body, FastAPI, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 from starlette.types import Lifespan
 
@@ -134,6 +135,64 @@ def create_app(
             ) from exc
         except Exception as exc:  # noqa: BLE001 - ohne Transkription gibt es nichts zu retten
             _log.exception("Verarbeitung fehlgeschlagen")
+            raise HTTPException(
+                status_code=500, detail=f"Verarbeitung fehlgeschlagen: {exc}"
+            ) from exc
+
+        return ProcessResponse(
+            final_text=result.final_text,
+            raw_text=result.raw_text,
+            dictionary_text=result.dictionary_text,
+            mode=result.mode.value,
+            language=result.language,
+            refined=result.refined,
+            fallback_reason=result.fallback_reason,
+            timings_ms=result.timings_ms,
+        )
+
+    @app.post("/process/stream", response_model=ProcessResponse)
+    async def process_audio_stream(
+        request: Request,
+        mode: Annotated[str, Query()],
+        language: Annotated[str | None, Query()] = None,
+        sample_rate: Annotated[int, Query()] = TARGET_SAMPLE_RATE,
+    ) -> ProcessResponse:
+        """Gestreamtes Float32-PCM (16 kHz mono) -> fertiger Text.
+
+        Der Body kommt häppchenweise (chunked) an, während der Anwender noch spricht. Die
+        Chunk-Grenzen liegen NICHT auf Sample-Grenzen — deshalb wird der 4-Byte-Rest über Grenzen
+        hinweg gepuffert.
+        """
+        if sample_rate != TARGET_SAMPLE_RATE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Erwarte {TARGET_SAMPLE_RATE} Hz, erhalten {sample_rate} Hz.",
+            )
+        try:
+            parsed_mode = Mode.from_string(mode)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        async def sample_chunks() -> AsyncIterator[np.ndarray]:
+            leftover = b""
+            async for raw in request.stream():
+                if not raw:
+                    continue
+                buf = leftover + raw
+                n = len(buf) - (len(buf) % _BYTES_PER_SAMPLE)
+                if n:
+                    yield np.frombuffer(buf[:n], dtype="<f4").astype(np.float32)
+                leftover = buf[n:]
+            # Ein unvollständiges Rest-Sample (<4 Byte) am Ende wird bewusst verworfen.
+
+        try:
+            result = await runtime.process_stream(sample_chunks(), parsed_mode, language=language)
+        except StartupFailedError as exc:
+            raise HTTPException(
+                status_code=503, detail=f"Sidecar nicht einsatzbereit: {exc}"
+            ) from exc
+        except Exception as exc:  # noqa: BLE001 - ohne Transkription gibt es nichts zu retten
+            _log.exception("Streaming-Verarbeitung fehlgeschlagen")
             raise HTTPException(
                 status_code=500, detail=f"Verarbeitung fehlgeschlagen: {exc}"
             ) from exc
