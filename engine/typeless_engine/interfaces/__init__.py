@@ -3,6 +3,6 @@
 from __future__ import annotations
 
 from .refiner import Refiner
-from .transcriber import Transcriber
+from .transcriber import StreamingTranscriber, Transcriber
 
-__all__ = ["Refiner", "Transcriber"]
+__all__ = ["Refiner", "StreamingTranscriber", "Transcriber"]
