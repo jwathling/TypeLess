@@ -180,8 +180,17 @@ class MLXRefiner(Refiner):
 
     def _reset_cache(self) -> None:
         """Stutzt den Cache nach einem Diktat wieder auf den festen Präfix zurück — bereit fürs
-        nächste. Sicher, weil die Verarbeitung serialisiert ist (Lock in runtime.py)."""
+        nächste. Sicher, weil die Verarbeitung serialisiert ist (Lock in runtime.py).
+
+        Kommt der Cache dabei NICHT exakt auf die Präfixlänge zurück, verwerfen wir ihn: Ein
+        nicht-trimmbarer Cache-Typ (z. B. Rotating-Cache eines künftigen Backends) würde sonst
+        Alt-Suffix behalten, und das nächste Diktat generierte gegen einen verunreinigten Cache —
+        ein Bruch der unverhandelbaren Qualitätsneutralität. Lieber laut auf den Voll-Prefill
+        zurückfallen (Cache = None) als still falsch."""
         from mlx_lm.models import cache as kv  # noqa: PLC0415
 
         assert self._cache is not None
         kv.trim_prompt_cache(self._cache, self._cache[0].offset - len(self._cache_prefix))
+        if self._cache[0].offset != len(self._cache_prefix):
+            _log.warning("Cache ließ sich nicht sauber zurückstutzen — verwerfe ihn.")
+            self._cache, self._cache_prefix, self._cache_mode = None, [], None
