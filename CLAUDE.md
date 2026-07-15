@@ -193,7 +193,24 @@ Systemdiktat, poppt bei jedem Diktat der Emoji-Picker auf — die App weist im M
      nicht gab).
   In **allen** Fehlerfällen bleibt die **Zwischenablage unangetastet** (alter Inhalt schlägt
   Leere) — s. Spec.
-- [ ] **M5** Einfügen · **M6** Modi-Umschalter · **M7** Settings-UI · **M8** Polish/Packaging.
+- [x] **M5** — Text an der Cursorposition einfügen (statt Zwischenablage). `Sources/TypeLessCore/
+  Insertion/`: `InsertionTarget` (fragt über die AX-Schnittstelle, wohin eingefügt werden darf —
+  vorderste App, Fokusziel, Element-Identität; **liest nie Feldinhalte**, `kAXValueAttribute` nur
+  auf Setzbarkeit) und `TextInserter` (`CGEventKeyboardSetUnicodeString`, surrogatpaar-sichere
+  Zerlegung, baut erst alle Ereignisse und postet dann — kein halb eingefügter Text). Der
+  `DictationCoordinator` prüft beim Zustellen **fünf** Bedingungen, sonst Zwischenablage:
+  Bedienungshilfen erteilt **und** Secure Event Input aus, dieselbe App, dasselbe Textfeld
+  (Element-Identität, nicht Inhalt), ein beschreibbares Feld, kein Passwortfeld. **Oberste Regel:
+  entweder eingefügt oder in der Zwischenablage — nie ein drittes Ergebnis.** Bei Erfolg bleibt
+  die Zwischenablage unangetastet. Die M4-Regel „die Zwischenablage bekommt jedes Ergebnis" ist
+  **gefallen**: Jedes Diktat prüft seinen **eigenen** gemerkten Fokus, nicht den des jüngsten
+  (sonst tippte ein überholtes Diktat in das inzwischen fokussierte Fenster). Bedienungshilfen
+  werden beim Start **angefordert** (nicht nur geprüft), das Menü warnt bei fehlendem Recht.
+  122 Tests grün, **mit echter Sprache in mehreren Apps handverifiziert** (direktes Einfügen,
+  Zwischenablage unangetastet). Bekannte, in der Spec benannte Grenzen: Passwortfeld ohne
+  AX-Subrolle; App, die ihre AX-Elemente während der Verarbeitung neu baut → gelegentlich unnötig
+  Zwischenablage.
+- [ ] **M6** Modi-Umschalter · **M7** Settings-UI · **M8** Polish/Packaging.
 
 ## Messwerte (M1, Apple Silicon, 16 GB)
 
