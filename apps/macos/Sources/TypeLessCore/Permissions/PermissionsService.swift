@@ -1,6 +1,6 @@
 import AVFoundation
 import AppKit
-import ApplicationServices
+@preconcurrency import ApplicationServices
 import Foundation
 import IOKit.hid
 
@@ -90,6 +90,19 @@ public protocol PermissionsService: Sendable {
     /// sagt, ob das Recht (jetzt) da ist.
     @discardableResult
     func requestInputMonitoring() -> Bool
+
+    /// Fordert die **Bedienungshilfen** an — **muss beim Programmstart aufgerufen werden**.
+    ///
+    /// Ohne dieses Recht postet `CGEvent.post` zwar klaglos, aber **nichts kommt an**: keine
+    /// Ausnahme, kein Rückgabewert, kein Hinweis — der Text erscheint einfach nicht. Genau die
+    /// Fehlerklasse, die in der M4-Handprobe einen Abend gekostet hat (dort beim `CGEventTap`,
+    /// s. ``requestInputMonitoring()``). Ohne Anfrage zeigt macOS keinen Dialog und trägt
+    /// TypeLess unter Umständen nicht einmal in die Liste ein, in der man den Schalter umlegen
+    /// könnte.
+    ///
+    /// Der Rückgabewert sagt, ob das Recht (jetzt) da ist.
+    @discardableResult
+    func requestAccessibility() -> Bool
 }
 
 public struct SystemPermissionsService: PermissionsService {
@@ -109,5 +122,21 @@ public struct SystemPermissionsService: PermissionsService {
     @discardableResult
     public func requestInputMonitoring() -> Bool {
         IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
+    }
+
+    @discardableResult
+    public func requestAccessibility() -> Bool {
+        // `kAXTrustedCheckOptionPrompt: true` ist der Unterschied zwischen "prüfen" und
+        // "anfordern" — nur damit zeigt macOS den Dialog und nimmt TypeLess in die Liste auf.
+        //
+        // Die Konstante kommt als globale `Unmanaged<CFString>`-Variable aus dem C-Header, den
+        // Apple noch nicht für Swift 6 auditiert hat — deshalb `@preconcurrency` am Import (s.
+        // oben). Ohne das lehnt der Compiler schon den lesenden Zugriff ab. Den Wert
+        // ("AXTrustedCheckOptionPrompt") stattdessen als String-Literal abzuschreiben wäre
+        // verlockend und funktionierte heute auch — es risse aber eine stille Bruchstelle auf,
+        // falls Apple die Konstante je ändert: Der Compiler merkte davon nichts, und der Dialog
+        // bliebe einfach aus. Lieber der echte Bezeichner.
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
+        return AXIsProcessTrustedWithOptions(options as CFDictionary)
     }
 }

@@ -24,25 +24,54 @@ public final class AppState {
     private let permissionsService: PermissionsService
     private let pollIntervalStarting: Duration
     private let pollIntervalReady: Duration
+    private let permissionsInterval: Duration
 
     private var pollTask: Task<Void, Never>?
+    private var permissionsTask: Task<Void, Never>?
 
     public init(lifecycle: SidecarLifecycle,
                 client: SidecarClient,
                 permissions: PermissionsService,
                 pollIntervalStarting: Duration = .seconds(1),
-                pollIntervalReady: Duration = .seconds(5)) {
+                pollIntervalReady: Duration = .seconds(5),
+                permissionsInterval: Duration = .seconds(2)) {
         self.lifecycle = lifecycle
         self.client = client
         permissionsService = permissions
         self.pollIntervalStarting = pollIntervalStarting
         self.pollIntervalReady = pollIntervalReady
+        self.permissionsInterval = permissionsInterval
         self.permissions = permissions.status()
     }
 
     // MARK: - Lebenszyklus
 
     public func start() async {
+        // M2 (Abschluss-Review M5): Die Rechte-Auffrischung läuft auf einer EIGENEN Achse — sie
+        // beginnt vor `lifecycle.start()` und hängt an dessen Ausgang nicht. Bis M5 lief sie im
+        // Engine-Poll mit, und der startet nur NACH einem erfolgreichen Start: Kam die Engine
+        // nicht hoch (fehlendes Engine-Verzeichnis — ein getesteter Fall), wurde `permissions`
+        // nie wieder gelesen. Erteilte der Anwender jetzt die Bedienungshilfen, blieb die
+        // Warnung „Text landet in der Zwischenablage" für immer stehen, obwohl das Recht da war.
+        //
+        // Zwei getrennte Tasks statt einer gemeinsamen: Der Engine-Poll DARF nicht laufen, wenn
+        // die Engine gar nicht steht (sein `health()` würde `engine` sofort von der klaren
+        // Startfehler-Meldung — „Engine nicht gefunden: …" — auf ein nichtssagendes „Verbindung
+        // zur Engine verloren" umschreiben). Die Rechte-Achse dagegen MUSS immer laufen. Zwei
+        // Zwecke, zwei Lebensdauern, zwei Tasks — das hält beide Schleifen dumm und ohne jede
+        // Fallunterscheidung. Es ist dieselbe Trennung wie zwischen `EngineState` und
+        // `SessionState`.
+        //
+        // Bewusst SYNCHRON (kein `await`) — nachgemessen, nicht vermutet: Eine zusätzliche
+        // Aufhängestelle HIER, vor `stopPolling()`, verschiebt die Reihenfolge, in der die alte
+        // Poll-Task und dieses `start()` nach einem doppelten Start wieder auf den MainActor
+        // kommen. Der Test `doppelterStartUeberlagertKeinePollTasks` lief damit in genau den
+        // Zustand, den er bewacht: Die alte Poll-Task kam vor dem `cancel()` noch zu einem
+        // weiteren `health()`-Aufruf, blieb in dessen (nicht stornierbarer) Continuation hängen,
+        // und `stopPolling()` wartete für immer auf sie. Die Rechte-Achse hat mit dieser
+        // Reihenfolge nichts zu tun und darf sie deshalb auch nicht anfassen.
+        startPermissionsPolling()
+
         engine = .starting
         do {
             _ = try await lifecycle.start()
@@ -63,6 +92,7 @@ public final class AppState {
 
     public func shutdown() async {
         await stopPolling()
+        await stopPermissionsPolling()
         await lifecycle.stop()
         engine = .stopped
     }
@@ -88,6 +118,59 @@ public final class AppState {
     /// Fehler, den es im Code gar nicht gab).
     public var hotkeyBrauchtEingabeueberwachung: Bool {
         !permissions.inputMonitoring
+    }
+
+    /// Fordert die Bedienungshilfen an und aktualisiert sofort die Anzeige — beim Programmstart
+    /// aufzurufen. Ohne dieses Recht kann TypeLess nie direkt einfügen; es fällt dann immer auf
+    /// die Zwischenablage zurück (ausführliche Begründung bei
+    /// ``PermissionsService/requestAccessibility()``).
+    public func requestAccessibility() {
+        permissionsService.requestAccessibility()
+        refreshPermissions()
+    }
+
+    /// Ohne Bedienungshilfen kann TypeLess Text nie direkt einfügen — es landet dann IMMER in der
+    /// Zwischenablage. Die App bleibt voll benutzbar, aber sie darf nicht so tun, als sei alles
+    /// in Ordnung (Lektion M4: „Bereit", während der Hotkey tot war).
+    public var einfuegenBrauchtBedienungshilfen: Bool {
+        !permissions.accessibility
+    }
+
+    // MARK: - Rechte-Auffrischung (M2, Abschluss-Review M5)
+
+    /// Liest die Berechtigungen im festen Takt neu — **unabhängig davon, ob die Engine läuft**.
+    ///
+    /// Ein Recht kann jederzeit dazukommen (der Anwender legt den Schalter in den
+    /// Systemeinstellungen um) oder wegfallen. Die Anzeige darf nie stehen bleiben: Genau diese
+    /// Fehlerklasse („veraltete Rechteanzeige") war in M3 schon einmal behoben, und M5 hat mit
+    /// der Bedienungshilfen-Warnung eine neue Anzeige an dieselbe (kaputte) Leitung gehängt.
+    /// Die drei Abfragen sind billig — ein eigener, langsamer Takt ist bezahlbar.
+    ///
+    /// Bricht eine eventuell noch laufende Vorgänger-Task ab, ohne auf deren Ende zu **warten**
+    /// (anders als ``stopPolling()``, s. Kommentar in ``start()``). Das ist hier ungefährlich:
+    /// Das Schlimmste, was eine abgelöste Rechte-Task noch tun kann, ist ein weiteres
+    /// ``refreshPermissions()`` — sie schreibt also bestenfalls denselben, schlimmstenfalls den
+    /// AKTUELLEN Rechtestand. Es gibt keinen Zustand, den sie überschreiben und damit verfälschen
+    /// könnte (beim Engine-Poll ist das anders: Dessen später Schreibzugriff würde ein
+    /// `engine = .stopped` aus ``shutdown()`` wieder aufheben).
+    private func startPermissionsPolling() {
+        permissionsTask?.cancel()
+        permissionsTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                self.refreshPermissions()
+                try? await Task.sleep(for: self.permissionsInterval)
+            }
+        }
+    }
+
+    /// Beim **Beenden** wird sehr wohl auf das Ende der Task gewartet: Danach soll wirklich nichts
+    /// mehr laufen, was auf `self` zugreift — dieselbe Sorgfalt wie bei ``stopPolling()``, nur
+    /// ohne dessen Zustands-Argument (s. ``startPermissionsPolling()``).
+    private func stopPermissionsPolling() async {
+        permissionsTask?.cancel()
+        await permissionsTask?.value
+        permissionsTask = nil
     }
 
     // MARK: - Polling
@@ -118,13 +201,11 @@ public final class AppState {
 
     /// Ein Poll-Durchgang. Liefert das Intervall bis zum nächsten.
     ///
-    /// Finding I1 (Review): Außerhalb der Tests wurde ``refreshPermissions()`` nie aufgerufen —
-    /// `permissions` blieb für die gesamte Laufzeit auf dem Stand aus `init`. Erteilt der Nutzer
-    /// ein fehlendes Recht in den Systemeinstellungen, blieb das Menü trotzdem dauerhaft bei ⚠
-    /// stehen. Die drei Abfragen sind billig, deshalb hier im ohnehin laufenden Poll-Takt mit
-    /// erledigen.
+    /// Kümmert sich **ausschließlich** um die Engine. Die Rechte-Auffrischung lief bis M5 hier
+    /// mit (Finding I1, Review M3) — sie ist seit M2 (Abschluss-Review M5) auf eine eigene Task
+    /// gezogen, weil diese hier nur nach einem ERFOLGREICHEN Engine-Start läuft; s.
+    /// ``startPermissionsPolling()``.
     private func pollOnce() async -> Duration {
-        refreshPermissions()
         do {
             let health = try await client.health()
             switch health.status {
