@@ -105,8 +105,13 @@ class MLXWhisperTranscriber(StreamingTranscriber):
         if self._stream_new_samples < STREAM_STEP_SAMPLES:
             return ""
         self._stream_new_samples = 0
+        # War schon Text festgeschrieben, bevor dieser Durchlauf lief? Dann bekommt
+        # die Rückgabe ein führendes Leerzeichen, damit sie direkt anhängbar ist.
+        hatte_text = len(self._agreement.committed) > 0
         newly = self._agreement.insert(self._transcribe_buffer_words())
-        return " ".join(newly)
+        if not newly:
+            return ""
+        return (" " if hatte_text else "") + " ".join(newly)
 
     def stream_finalize(self) -> Transcription:
         # Ein letzter Durchlauf über das vollständige Audio, dann den Rest ohne zweite

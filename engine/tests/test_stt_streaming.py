@@ -40,6 +40,10 @@ def test_stream_schreibt_stabile_woerter_fest(fake_stream: FakeGrowingWhisper) -
     for _ in range(5):
         committed += t.stream_feed(_sekunde())
     final = t.stream_finalize()
+    # Die laufend über stream_feed zusammengesetzte Zwischenausgabe muss SAUBER GETRENNTE Wörter
+    # ergeben (kein "dasist") — das letzte Wort kommt erst per finalize dazu.
+    assert committed.split() == FakeGrowingWhisper.WORDS[:4]
+    assert " " in committed  # Wörter sind getrennt, nicht verklebt
     # Alle fünf Wörter erscheinen am Ende, in Reihenfolge.
     assert final.text.split() == FakeGrowingWhisper.WORDS
     assert final.language == "de"
