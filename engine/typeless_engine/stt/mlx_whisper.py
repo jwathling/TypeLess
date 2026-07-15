@@ -13,9 +13,10 @@ from typing import Any
 
 import numpy as np
 
-from ..interfaces import Transcriber
+from ..interfaces import StreamingTranscriber
 from ..logging_ import get_logger
 from ..models import TARGET_SAMPLE_RATE, AudioBuffer, Transcription
+from .local_agreement import LocalAgreement
 
 _log = get_logger(__name__)
 
@@ -25,8 +26,12 @@ DEFAULT_MODEL = "mlx-community/whisper-large-v3-turbo"
 # kürzer bringt also nichts, länger kostet nur Zeit.
 WARM_UP_SAMPLES = TARGET_SAMPLE_RATE // 10
 
+# Takt der Streaming-Neu-Transkription: alle ~1 s Audio wird der Puffer erneut durch Whisper
+# geschickt. Kürzer => mehr GPU-Last, kaum stabilere Wörter; länger => sichtbar trägeres Overlay.
+STREAM_STEP_SAMPLES = TARGET_SAMPLE_RATE
 
-class MLXWhisperTranscriber(Transcriber):
+
+class MLXWhisperTranscriber(StreamingTranscriber):
     """Transcriber auf Basis von ``mlx_whisper`` (Metal, Apple Silicon)."""
 
     def __init__(self, model: str = DEFAULT_MODEL) -> None:
@@ -70,7 +75,7 @@ class MLXWhisperTranscriber(Transcriber):
             # folgenden Fenster — sie läuft dann bis zum Ende des Diktats durch.
             #
             # In der Handprobe zu M4 real passiert: Ein sonst sauberes Diktat endete in
-            # „beber beber beber …“, hunderte Male, bis zum Schluss.
+            # „beber beber beber …", hunderte Male, bis zum Schluss.
             #
             # `condition_on_previous_text=False` kappt die Weitergabe. Preis: Whisper verliert
             # den Kontext über Fenstergrenzen hinweg (z. B. Eigennamen, die vorher fielen). Für
@@ -85,3 +90,45 @@ class MLXWhisperTranscriber(Transcriber):
             language=result.get("language"),
             duration_seconds=audio.duration_seconds,
         )
+
+    def stream_begin(self, *, language: str | None = None) -> None:
+        self._stream_language = language
+        self._stream_detected_language: str | None = None
+        self._stream_buffer = np.zeros(0, dtype=np.float32)
+        self._stream_new_samples = 0
+        self._agreement = LocalAgreement()
+
+    def stream_feed(self, samples: np.ndarray) -> str:
+        self._stream_buffer = np.concatenate([self._stream_buffer, samples.astype(np.float32)])
+        self._stream_new_samples += len(samples)
+        # Nur im festen Takt erneut transkribieren — nicht bei jedem winzigen Häppchen.
+        if self._stream_new_samples < STREAM_STEP_SAMPLES:
+            return ""
+        self._stream_new_samples = 0
+        newly = self._agreement.insert(self._transcribe_buffer_words())
+        return " ".join(newly)
+
+    def stream_finalize(self) -> Transcription:
+        # Ein letzter Durchlauf über das vollständige Audio, dann den Rest ohne zweite
+        # Bestätigung akzeptieren (Ende des Diktats).
+        self._agreement.insert(self._transcribe_buffer_words())
+        self._agreement.finalize()
+        text = " ".join(self._agreement.committed).strip()
+        seconds = len(self._stream_buffer) / TARGET_SAMPLE_RATE
+        return Transcription(
+            text=text, language=self._stream_detected_language, duration_seconds=seconds
+        )
+
+    def _transcribe_buffer_words(self) -> list[str]:
+        """Transkribiert den aktuellen Puffer und liefert die Wortliste (leer bei leerem Puffer)."""
+        if len(self._stream_buffer) == 0:
+            return []
+        mlx_whisper = self._import_backend()
+        result = mlx_whisper.transcribe(
+            self._stream_buffer,
+            path_or_hf_repo=self._model,
+            language=self._stream_language,
+            condition_on_previous_text=False,  # gleiche Begründung wie im Batch-Pfad
+        )
+        self._stream_detected_language = result.get("language")
+        return str(result.get("text", "")).strip().split()
