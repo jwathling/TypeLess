@@ -210,7 +210,21 @@ Systemdiktat, poppt bei jedem Diktat der Emoji-Picker auf — die App weist im M
   Zwischenablage unangetastet). Bekannte, in der Spec benannte Grenzen: Passwortfeld ohne
   AX-Subrolle; App, die ihre AX-Elemente während der Verarbeitung neu baut → gelegentlich unnötig
   Zwischenablage.
-- [ ] **M6** Modi-Umschalter · **M7** Settings-UI · **M8** Polish/Packaging.
+- [x] **M8-Teil vorgezogen — Prompt-Prefix-Cache** (LLM-Latenz). Der `MLXRefiner` cacht den
+  festen 424-Token-Systemprompt **einmal** beim `preload()` und generiert pro Diktat nur den
+  kurzen Suffix (Diktattext) gegen diesen KV-Cache; danach wird der Cache auf die Präfixlänge
+  zurückgestutzt. Alles in `engine/typeless_engine/llm/mlx_refiner.py` — die Schnittstelle
+  `Refiner` und `factory.py` bleiben unberührt (Austauschbarkeit). Die reinen Helfer
+  (`statischer_praefix` über den längsten gemeinsamen Präfix zweier Diktate, `beginnt_mit` als
+  Wächter) und die Cache-Politik sind **ohne MLX** testbar (Test-Unterklasse `SpyRefiner`); die
+  MLX-Aufrufe liegen hinter drei Nähten (`_prime_cache`/`_generate`/`_reset_cache`).
+  **Qualitätsneutral belegt:** on-device (echtes 4B-Modell) war die Ausgabe mit Cache in 3/3
+  greedy-Läufen **bit-identisch** zur Ausgabe ohne Cache (über je zwei Diktate). **Kein Diktat
+  geht je verloren:** jeder Fehlerpfad (Cache-Aufbau scheitert, Wächter negativ, Ausnahme mitten
+  in der Generierung) fällt auf den Voll-Prefill zurück — zwei Mutationsproben belegen das. Ein
+  nicht sauber zurückstutzbarer Cache (künftiges Backend) wird **verworfen** statt still
+  korrumpiert. 109 Engine-Tests grün (+ 2 On-device, überspringen sich ohne `TYPELESS_ONDEVICE=1`).
+- [ ] **M6** Modi-Umschalter · **M7** Settings-UI · **M8** Polish/Packaging (Rest).
 
 ## Messwerte (M1, Apple Silicon, 16 GB)
 
@@ -226,7 +240,13 @@ Gewichte per mmap lädt):
 Latenz: STT ≈ **0,17× Echtzeit** (48 s Audio → 8,4 s). LLM-Preload 3,9 s (gecacht),
 Refine 3,2–3,6 s. Für ein 15-s-Diktat also grob 2,6 s STT + ~3,5 s LLM. Das Planziel von
 2–4 s nach dem Loslassen wird damit **nicht** erreicht (eher 6 s); der spekulative Preload
-verdeckt nur die Ladezeit, nicht die Generierung. Optimierung → M8.
+verdeckt nur die Ladezeit, nicht die Generierung.
+
+**Nach dem Prompt-Prefix-Cache (s. M8-Teil oben):** Der feste Systemprompt wird nicht mehr bei
+jedem Diktat neu geprefillt. On-device gemessene Ersparnis **~1,3–3,1 s pro Diktat** (lastabhängig).
+Damit landet ein Diktat grob bei **~6–7 s statt ~8–9 s** nach dem Loslassen. Die ~4 s STT bleiben
+die Untergrenze — tiefer geht es nur über die zurückgestellten Qualitäts-Kompromisse (kleineres
+Whisper, kürzerer Prompt). Das ist der verbleibende Posten für M8.
 
 ## Konventionen
 
