@@ -14,18 +14,19 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, replace
 
+import numpy as np
 from anyio import to_thread
 
 from ..config import EngineConfig
 from ..dictionary import DictionaryEngine
 from ..factory import build_dictionary, build_refiner, build_transcriber
-from ..interfaces import Refiner, Transcriber
+from ..interfaces import Refiner, StreamingTranscriber, Transcriber
 from ..logging_ import get_logger
-from ..models import AudioBuffer, Mode, ProcessResult
-from ..pipeline import PipelineConfig, process
+from ..models import AudioBuffer, Mode, ProcessResult, Transcription
+from ..pipeline import PipelineConfig, process, process_text
 
 _log = get_logger(__name__)
 
@@ -318,4 +319,102 @@ class EngineRuntime:
             refiner=self._refiner,
             dictionary=self._dictionary,
             config=PipelineConfig(language=language),
+        )
+
+    async def process_stream(
+        self,
+        audio_chunks: AsyncIterator[np.ndarray],
+        mode: Mode,
+        *,
+        language: str | None = None,
+    ) -> ProcessResult:
+        """Wie ``process``, aber die Transkription läuft schon **während** des Sprechens.
+
+        Serialisiert (ein Diktat zur Zeit). Das LLM wird parallel zur Transkription geladen, damit
+        seine Ladezeit im Sprechen verschwindet. Kann das Backend kein Streaming oder scheitert das
+        Streaming, fällt der Aufruf auf den Batch-Weg über das vollständig gepufferte Audio zurück —
+        nie ein Diktat verlieren.
+        """
+        await self._ready.wait()
+        if self._startup_error is not None:
+            raise StartupFailedError(self._startup_error)
+        effective_language = language if language is not None else self._config.language
+
+        async with self._lock:
+            self._busy = True
+            self._refiner.reset()
+            # LLM parallel laden (Gewichte, weitgehend I/O) — überlappt mit der Transkription.
+            preload_task = asyncio.create_task(to_thread.run_sync(self._refiner.preload))
+            try:
+                transcription = await self._consume_stream(audio_chunks, effective_language)
+                await preload_task
+                self._llm_loaded = self._refiner.last_error is None
+                self._last_used = self._clock()
+                result = await to_thread.run_sync(
+                    self._refine_transcription, transcription, mode, effective_language
+                )
+                if self._refiner.last_error is not None:
+                    result = replace(result, fallback_reason=self._refiner.last_error)
+                return result
+            finally:
+                if not preload_task.done():
+                    preload_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await preload_task
+                self._busy = False
+
+    async def _consume_stream(
+        self, audio_chunks: AsyncIterator[np.ndarray], language: str | None
+    ) -> Transcription:
+        """Konsumiert die Audio-Häppchen und liefert das Roh-Transkript.
+
+        Streamt, wenn das Backend es kann; sammelt dabei ALLES Audio, um bei einem Streaming-Fehler
+        (oder einem reinen Batch-Backend) auf ``transcribe(audio)`` zurückfallen zu können.
+        """
+        streaming = (
+            self._transcriber if isinstance(self._transcriber, StreamingTranscriber) else None
+        )
+        collected: list[np.ndarray] = []
+        if streaming is not None:
+            try:
+                await to_thread.run_sync(lambda: streaming.stream_begin(language=language))
+                async for chunk in audio_chunks:
+                    collected.append(chunk)
+                    newly = await to_thread.run_sync(streaming.stream_feed, chunk)
+                    # Festgeschriebenen Text bereitstellen + loggen (Datenquelle fürs spätere
+                    # Overlay; im Motor-Teil noch nicht zum Client durchgereicht — s. Spec §3).
+                    if newly:
+                        _log.debug("festgeschrieben: %s", newly)
+                return await to_thread.run_sync(streaming.stream_finalize)
+            except Exception:  # noqa: BLE001 - jeder Streaming-Fehler => Batch-Rückfall
+                _log.warning("Streaming fehlgeschlagen — falle auf Batch zurück.")
+                async for chunk in audio_chunks:
+                    collected.append(chunk)  # evtl. noch nicht konsumierte Häppchen mitnehmen
+                return await self._batch_transcribe(collected, language)
+        # Reines Batch-Backend: alles sammeln, einmal transkribieren.
+        async for chunk in audio_chunks:
+            collected.append(chunk)
+        return await self._batch_transcribe(collected, language)
+
+    async def _batch_transcribe(
+        self, chunks: list[np.ndarray], language: str | None
+    ) -> Transcription:
+        samples = (np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)).astype(
+            np.float32
+        )
+        audio = AudioBuffer(samples=samples)
+        return await to_thread.run_sync(
+            lambda: self._transcriber.transcribe(audio, language=language)
+        )
+
+    def _refine_transcription(
+        self, transcription: Transcription, mode: Mode, language: str | None
+    ) -> ProcessResult:
+        """Blockierender Teil: Wörterbuch → Refiner → Löschschutz (bestehende Pipeline)."""
+        return process_text(
+            transcription.text,
+            mode,
+            refiner=self._refiner,
+            dictionary=self._dictionary,
+            language=transcription.language or language,
         )
