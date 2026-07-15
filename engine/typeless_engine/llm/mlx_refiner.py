@@ -136,19 +136,29 @@ class MLXRefiner(Refiner):
         )
         sampler = mlx_lm.sample_utils.make_sampler(temp=spec.temperature)
 
-        if (
+        nutze_cache = (
             self._cache is not None
             and self._cache_mode == mode
             and beginnt_mit(full, self._cache_prefix)
-        ):
-            # Nur den Diktattext gegen den vorgewärmten Präfix-Cache generieren (Absicherung 1: der
-            # Wächter oben stellt sicher, dass der Cache wirklich passt), danach zurückstutzen.
-            suffix = list(full[len(self._cache_prefix) :])
-            output = self._generate(suffix, spec, sampler, cache=self._cache)
-            self._reset_cache()
-        else:
-            # Kein passender Cache: voller Prefill wie bisher.
-            output = self._generate(list(full), spec, sampler, cache=None)
+        )
+        if nutze_cache:
+            try:
+                # Nur den Diktattext gegen den vorgewärmten Präfix-Cache generieren, danach den
+                # Cache wieder auf den Präfix zurückstutzen — bereit fürs nächste Diktat.
+                suffix = list(full[len(self._cache_prefix) :])
+                output = self._generate(suffix, spec, sampler, cache=self._cache)
+                self._reset_cache()
+                return str(output).strip()
+            except Exception:  # noqa: BLE001 - Cache-Pfad gescheitert, Diktat trotzdem retten
+                # Der Cache ist nach einem Fehler mitten in der Generierung in unbekanntem Zustand.
+                # Verwerfen, damit ihn das nächste Diktat NICHT wiederverwendet, und unten voll
+                # prefillen — nie ein Diktat verlieren.
+                _log.warning(
+                    "Cache-Pfad fehlgeschlagen — verwerfe Cache, falle auf Voll-Prefill zurück."
+                )
+                self._cache, self._cache_prefix, self._cache_mode = None, [], None
+        # Kein passender Cache (oder Cache-Pfad gescheitert): voller Prefill wie bisher.
+        output = self._generate(list(full), spec, sampler, cache=None)
         return str(output).strip()
 
     def _generate(

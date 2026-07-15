@@ -125,3 +125,29 @@ def test_leerer_text_bemueht_das_modell_nicht() -> None:
     r = SpyRefiner()
     assert r.refine("   ", Mode.DIKTAT) == "   "
     assert r.generate_aufrufe == []
+
+
+def test_cache_pfad_fehler_verwirft_cache_und_rettet_das_diktat() -> None:
+    class BoeserGenerate(SpyRefiner):
+        def _generate(
+            self, prompt_tokens: list[int], spec: Any, sampler: Any, cache: Any | None
+        ) -> Any:
+            self.generate_aufrufe.append(
+                {"tokens": list(prompt_tokens), "mit_cache": cache is not None}
+            )
+            if cache is not None:
+                raise RuntimeError("MLX-Fehler mitten in der Generierung")
+            return "AUSGABE"
+
+    r = BoeserGenerate()
+    out = r.refine("hi", Mode.DIKTAT)
+    # Diktat gerettet über Voll-Prefill statt verloren:
+    assert out == "AUSGABE"
+    # Erst Cache-Pfad (wirft), dann voller Prefill mit dem GANZEN Prompt:
+    assert r.generate_aufrufe[0]["mit_cache"] is True
+    assert r.generate_aufrufe[1]["mit_cache"] is False
+    assert r.generate_aufrufe[1]["tokens"] == [*FakeTokenizer.SYS, ord("h"), ord("i"), 2001]
+    # Cache verworfen, damit das nächste Diktat ihn nicht wiederverwendet:
+    assert r._cache is None
+    assert r._cache_prefix == []
+    assert r._cache_mode is None
