@@ -159,6 +159,7 @@ struct FakePermissions: PermissionsService {
     }
     func openSettings(for permission: Permission) {}
     @discardableResult func requestInputMonitoring() -> Bool { granted }
+    @discardableResult func requestAccessibility() -> Bool { granted }
 }
 
 /// Zählt mit, ob die Eingabeüberwachung wirklich ANGEFORDERT wurde — und beginnt so, wie es beim
@@ -168,6 +169,7 @@ final class ZaehlendePermissions: PermissionsService, @unchecked Sendable {
     private let lock = NSLock()
     private var erteilt = false
     private(set) var anfragen = 0
+    private(set) var axAnfragen = 0
 
     func status() -> PermissionStatus {
         lock.lock(); defer { lock.unlock() }
@@ -181,6 +183,14 @@ final class ZaehlendePermissions: PermissionsService, @unchecked Sendable {
     func requestInputMonitoring() -> Bool {
         lock.lock(); defer { lock.unlock() }
         anfragen += 1
+        erteilt = true
+        return true
+    }
+
+    @discardableResult
+    func requestAccessibility() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        axAnfragen += 1
         erteilt = true
         return true
     }
@@ -204,6 +214,7 @@ final class MutablePermissions: PermissionsService, @unchecked Sendable {
 
     func openSettings(for permission: Permission) {}
     @discardableResult func requestInputMonitoring() -> Bool { status().inputMonitoring }
+    @discardableResult func requestAccessibility() -> Bool { status().accessibility }
 }
 
 @MainActor
@@ -380,38 +391,83 @@ func engineMeldetFailedStatusWirdMitKlartextUebernommen() async {
     await state.shutdown()
 }
 
-// Finding I1 (Review): `refreshPermissions()` wurde außerhalb der Tests nie aufgerufen —
+// Finding I1 (Review M3): `refreshPermissions()` wurde außerhalb der Tests nie aufgerufen —
 // `permissions` blieb für die gesamte Laufzeit der App auf dem Stand aus `init`. Erteilt der
 // Nutzer ein fehlendes Recht in den Systemeinstellungen, während TypeLess bereits läuft, blieb
 // das Menü trotzdem dauerhaft bei ⚠ stehen. Dieser Test belegt, dass eine Änderung des
 // Berechtigungsstatus während einer laufenden Sitzung tatsächlich in `AppState.permissions`
 // ankommt — ohne dass irgendjemand `refreshPermissions()` von außen aufruft.
+//
+// M2 (Abschluss-Review M5): Die Auffrischung hing bis M5 am Engine-Poll und war damit an dessen
+// Gating messbar; seit sie auf einer eigenen Task läuft (s. `startPermissionsPolling()`), wird
+// hier auf ihren eigenen Takt gewartet — mit ECHTER Zeit, aber gedeckelt: Läuft die Obergrenze
+// ab, wird der Test sichtbar ROT, er hängt nicht.
 @MainActor
 @Test(.timeLimit(.minutes(1)))
 func berechtigungsAenderungWaehrendDerSitzungKommtInAppStateAn() async {
     let permissions = MutablePermissions(granted: false)
-    let client = GatedClient(.success(health("ready")))
-    let state = AppState(lifecycle: FakeLifecycle(.success(.spawned)), client: client,
+    let state = AppState(lifecycle: FakeLifecycle(.success(.spawned)),
+                         client: StaticClient(.success(health("ready"))),
                          permissions: permissions,
-                         pollIntervalStarting: .milliseconds(10), pollIntervalReady: .milliseconds(10))
+                         pollIntervalStarting: .milliseconds(10), pollIntervalReady: .milliseconds(10),
+                         permissionsInterval: .milliseconds(5))
     await state.start()
     #expect(state.permissions.microphone == false)
-
-    var iterator = client.started.makeAsyncIterator()
-    _ = await iterator.next()   // erster Poll (ausgelöst von startPolling() in start()) ist in Flug
 
     // Der Nutzer erteilt das Recht jetzt, während die Sitzung bereits läuft — niemand ruft
     // refreshPermissions() explizit auf.
     permissions.setGranted(true)
-    client.release()
 
-    _ = await iterator.next()   // nächster Poll in Flug -> voriger vollständig verarbeitet
+    await warteBisMitEchterZeit { state.permissions.microphone }
+
     #expect(state.permissions.microphone == true,
-            "eine während der Sitzung erteilte Berechtigung muss beim nächsten Poll ankommen")
+            "eine während der Sitzung erteilte Berechtigung muss von selbst in AppState ankommen")
     #expect(state.permissions.accessibility == true)
     #expect(state.permissions.inputMonitoring == true)
 
-    client.release()
+    await state.shutdown()
+}
+
+// M2 (Abschluss-Review M5): Die Rechte-Anzeige fror ein, wenn die Engine NICHT startete.
+// `startPolling()` — und damit bis M5 die einzige Stelle, die im laufenden Betrieb
+// `refreshPermissions()` rief — läuft nur nach einem ERFOLGREICHEN `lifecycle.start()`. Kam die
+// Engine nicht hoch (fehlendes Engine-Verzeichnis: ein real getesteter Fall), wurde `permissions`
+// nie wieder gelesen. Erteilte der Anwender jetzt die Bedienungshilfen, blieb die Warnung „Text
+// landet in der Zwischenablage" DAUERHAFT stehen, obwohl das Recht längst da war — dieselbe
+// Fehlerklasse wie Finding I1 aus Review M3, nur an einer neuen Anzeige.
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func rechteWerdenAuchDannAufgefrischtWennDieEngineGarNichtStartet() async {
+    let permissions = MutablePermissions(granted: false)
+    let state = AppState(lifecycle: FakeLifecycle(.failure(.engineDirectoryMissing("/gibt/es/nicht"))),
+                         client: StaticClient(.failure(.unreachable)),
+                         permissions: permissions,
+                         pollIntervalStarting: .milliseconds(10), pollIntervalReady: .milliseconds(10),
+                         permissionsInterval: .milliseconds(5))
+
+    await state.start()
+
+    #expect(state.engine == .failed("Engine nicht gefunden: /gibt/es/nicht"),
+            "Vorbedingung: die Engine steht NICHT — also läuft kein Engine-Poll")
+    #expect(state.einfuegenBrauchtBedienungshilfen)
+
+    // Der Anwender legt jetzt den Schalter in den Systemeinstellungen um.
+    permissions.setGranted(true)
+
+    await warteBisMitEchterZeit { !state.einfuegenBrauchtBedienungshilfen }
+
+    #expect(!state.einfuegenBrauchtBedienungshilfen,
+            """
+            auch ohne laufende Engine muss eine erteilte Berechtigung ankommen — sonst behauptet \
+            das Menü für immer „Bedienungshilfen fehlen", obwohl sie da sind
+            """)
+    #expect(!state.hotkeyBrauchtEingabeueberwachung)
+
+    // Und die Rechte-Achse darf den Engine-Zustand nicht anfassen: Der Klartext-Grund des
+    // Startfehlers muss unverändert stehen bleiben.
+    #expect(state.engine == .failed("Engine nicht gefunden: /gibt/es/nicht"),
+            "die Rechte-Auffrischung darf den Engine-Zustand nicht überschreiben")
+
     await state.shutdown()
 }
 
@@ -572,5 +628,28 @@ func eingabeueberwachungWirdAktivAngefordertUndNichtNurGeprueft() async throws {
 
     #expect(permissions.anfragen == 1, "das Recht muss ANGEFORDERT werden, nicht nur geprüft")
     #expect(!state.hotkeyBrauchtEingabeueberwachung,
+            "nach erteiltem Recht muss die Anzeige das sofort widerspiegeln")
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func bedienungshilfenWerdenAktivAngefordertUndNichtNurGeprueft() async throws {
+    // Dieselbe Falle wie bei der Eingabeüberwachung in M4: `CGEvent.post` braucht das Recht
+    // "Bedienungshilfen". Fehlt es, passiert beim Einfügen schlicht NICHTS — kein Fehler, kein
+    // Hinweis. Wird das Recht nur GEPRÜFT und nie ANGEFORDERT, fragt macOS den Anwender nie.
+    let permissions = ZaehlendePermissions()
+    let state = AppState(lifecycle: FakeLifecycle(.success(.adopted)),
+                         client: StaticClient(.success(health("ready"))),
+                         permissions: permissions,
+                         pollIntervalStarting: .milliseconds(10),
+                         pollIntervalReady: .milliseconds(10))
+
+    #expect(state.einfuegenBrauchtBedienungshilfen,
+            "vor der Anfrage fehlt das Recht — das Menü muss das sagen können")
+
+    state.requestAccessibility()
+
+    #expect(permissions.axAnfragen == 1, "das Recht muss ANGEFORDERT werden, nicht nur geprüft")
+    #expect(!state.einfuegenBrauchtBedienungshilfen,
             "nach erteiltem Recht muss die Anzeige das sofort widerspiegeln")
 }

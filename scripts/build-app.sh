@@ -41,10 +41,23 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-echo "== ad-hoc signieren =="
-# Ad-hoc-Signatur (-) reicht für den persönlichen Gebrauch. Achtung: Die Identität ändert
-# sich bei jedem Neubau, macOS kann deshalb erneut nach Berechtigungen fragen.
-# Ein echtes Zertifikat gibt es erst in M8.
-codesign --force --deep --sign - "$APP"
+# macOS bindet Mikrofon-/Bedienungshilfen-/Eingabeüberwachungs-Rechte an die SIGNATUR-Identität.
+# Eine Ad-hoc-Signatur (`--sign -`) erzeugt bei JEDEM Neubau eine neue Identität — die Rechte
+# gehen dann jedes Mal verloren, obwohl der Schalter in den Einstellungen noch „an" aussieht (er
+# zeigt auf die alte Identität). Das kostet bei jedem Testlauf denselben Rechte-Tanz.
+#
+# Deshalb signieren wir mit einer STABILEN, selbst-signierten Entwickler-Identität, wenn sie im
+# Schlüsselbund liegt. Anlegen (einmalig): siehe scripts/setup-signing-identity.sh. Damit bleibt
+# die Identität über alle Neubauten gleich, und die Rechte werden nur ein einziges Mal erteilt.
+# Ein echtes Apple-Zertifikat (für die Weitergabe an andere) gibt es erst in M8.
+SIGN_IDENTITY="${TYPELESS_SIGN_IDENTITY:-TypeLess Dev}"
+if security find-identity -p codesigning 2>/dev/null | grep -q "$SIGN_IDENTITY"; then
+  echo "== signieren mit stabiler Identität: $SIGN_IDENTITY =="
+  codesign --force --deep --sign "$SIGN_IDENTITY" "$APP"
+else
+  echo "== stabile Identität '$SIGN_IDENTITY' nicht gefunden — ad-hoc (Rechte gehen bei jedem Neubau verloren) =="
+  echo "   Einmalig einrichten: bash scripts/setup-signing-identity.sh"
+  codesign --force --deep --sign - "$APP"
+fi
 
 echo "Fertig: apps/macos/$APP"

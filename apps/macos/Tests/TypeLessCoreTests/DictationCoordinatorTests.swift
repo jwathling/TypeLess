@@ -234,10 +234,63 @@ func stille(sekunden: Double = 1.0) -> [Float] {
     [Float](repeating: 0.0001, count: Int(16_000 * sekunden))
 }
 
+/// Steuerbare Antwort auf „wohin darf eingefügt werden?" (M5).
+final class FakeTarget: InsertionTarget, @unchecked Sendable {
+    private let lock = NSLock()
+    private var app: pid_t?
+    private var ziel: Fokusziel
+    /// Welches TEXTFELD gerade den Fokus hat (Abschluss-Review M5). `nil` heißt: keine Identität zu
+    /// haben — so, wie die echte AX-Schnittstelle ohne Bedienungshilfen antwortet.
+    ///
+    /// Erfunden, nicht echt: ``Fokuskennung/fuerTest(_:)`` gibt es genau deshalb — der Koordinator
+    /// muss ohne Fenster und ohne erteilte Rechte prüfbar bleiben. Ein Protokoll, das rohe
+    /// `AXUIElement` durchreichte, machte diese Attrappe unmöglich.
+    private var feld: UInt64?
+
+    init(app: pid_t? = 42, ziel: Fokusziel = .beschreibbaresTextfeld, feld: UInt64? = 1) {
+        self.app = app
+        self.ziel = ziel
+        self.feld = feld
+    }
+
+    /// Simuliert, dass der Anwender in eine ANDERE App gewechselt ist.
+    func wechsleApp(zu neue: pid_t?) { lock.lock(); app = neue; lock.unlock() }
+    func setzeZiel(_ neues: Fokusziel) { lock.lock(); ziel = neues; lock.unlock() }
+    /// Simuliert, dass der Anwender innerhalb DERSELBEN App in ein anderes Textfeld gesprungen ist
+    /// (⌘L in die Adressleiste des Browsers, Tab vom Mail-Rumpf ins Betreff-Feld).
+    func wechsleFeld(zu neues: UInt64?) { lock.lock(); feld = neues; lock.unlock() }
+
+    func vordersteApp() -> pid_t? { lock.lock(); defer { lock.unlock() }; return app }
+    func fokusziel() -> Fokusziel { lock.lock(); defer { lock.unlock() }; return ziel }
+    func fokusKennung() -> Fokuskennung? {
+        lock.lock(); defer { lock.unlock() }
+        return feld.map { Fokuskennung.fuerTest($0) }
+    }
+}
+
+/// Schreibt nur mit, was getippt WORDEN WÄRE — im Test erscheint nirgends echter Text (M5).
+final class SpyInserter: TextInserter, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _getippt: [String] = []
+    private let fehler: TextInserterError?
+
+    init(fehler: TextInserterError? = nil) { self.fehler = fehler }
+
+    var getippt: [String] { lock.lock(); defer { lock.unlock() }; return _getippt }
+
+    func insert(_ text: String) throws {
+        if let fehler { throw fehler }
+        lock.lock(); _getippt.append(text); lock.unlock()
+    }
+}
+
 @MainActor
 func makeCoordinator(hotkey: HotkeyMonitor, recorder: AudioRecorder,
                      client: SidecarClient, pasteboard: Pasteboard,
-                     keyDownCounter: KeyDownCounter = FakeKeyDownCounter()) -> DictationCoordinator {
+                     inserter: TextInserter = SpyInserter(),
+                     target: InsertionTarget = FakeTarget(),
+                     keyDownCounter: KeyDownCounter = FakeKeyDownCounter(),
+                     aufnahmeObergrenze: Duration = .seconds(120)) -> DictationCoordinator {
     // Auf Protokolltypen verbreitert (statt der konkreten Attrappen `FakeRecorder`/
     // `DictationClient`/`FakeHotkey`/`SpyPasteboard`): Damit lassen sich auch die torgesteuerten
     // Doubles `GatedRecorder`/`GatedDictationClient` (Findings 1–3, Review zu Task 4) hier
@@ -247,7 +300,14 @@ func makeCoordinator(hotkey: HotkeyMonitor, recorder: AudioRecorder,
     // `keyDownCounter` Default `FakeKeyDownCounter()` (NICHT `SystemKeyDownCounter()`, s. dort):
     // Ein feststehender Zähler, der nie von selbst steigt — bestehende Tests, die Fn nie als
     // Modifier benutzen, bleiben damit unberührt von I1 (Review M4).
+    //
+    // M5: `inserter`/`target` Defaults `SpyInserter()`/`FakeTarget()` — NIE die echten
+    // `CGEventTextInserter`/`AXInsertionTarget`: Sonst würde ein Testlauf tatsächlich Text in das
+    // gerade vorderste Fenster tippen (in der Regel das Terminal, in dem `swift test` läuft) und
+    // die Weiche „darf getippt werden?" hinge am Rechtezustand der Maschine.
     DictationCoordinator(hotkey: hotkey, recorder: recorder, client: client, pasteboard: pasteboard,
+                         inserter: inserter, target: target,
+                         aufnahmeObergrenze: aufnahmeObergrenze,
                          keyDownCounter: keyDownCounter)
 }
 
@@ -303,13 +363,19 @@ func druckStartetAufnahmeUndPreload() async throws {
 
 @MainActor
 @Test(.timeLimit(.minutes(1)))
-func loslassenVerarbeitetUndSchreibtInDieZwischenablage() async throws {
+func loslassenVerarbeitetUndStelltDenTextZu() async throws {
+    // M5: Hieß bis M4 `loslassenVerarbeitetUndSchreibtInDieZwischenablage` und prüfte
+    // `pasteboard.geschrieben` — das ist seit M5 fachlich falsch: Im Normalfall (dieselbe App,
+    // beschreibbares Textfeld) wird DIREKT eingefügt, und die Zwischenablage bleibt unangetastet.
+    // Der Test prüft unverändert dasselbe: Nach dem Loslassen kommt der Text beim Anwender an,
+    // und der Zustand kehrt nach `.idle` zurück — nur der Weg dorthin ist ein anderer.
     let hotkey = FakeHotkey()
     let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter()
     let coordinator = makeCoordinator(
         hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
         client: DictationClient(ergebnis: .success(ergebnis("Guten Morgen."))),
-        pasteboard: pasteboard)
+        pasteboard: pasteboard, inserter: inserter)
     await coordinator.start()
 
     hotkey.send(.pressed)
@@ -317,7 +383,8 @@ func loslassenVerarbeitetUndSchreibtInDieZwischenablage() async throws {
     hotkey.send(.released)
     await warteBis { coordinator.session == .idle }
 
-    #expect(pasteboard.geschrieben == ["Guten Morgen."])
+    #expect(inserter.getippt == ["Guten Morgen."])
+    #expect(pasteboard.geschrieben.isEmpty)
     #expect(coordinator.session == .idle)
 
     await coordinator.stop()
@@ -357,10 +424,11 @@ func gescheiterterPreloadVerhindertDasDiktatNicht() async throws {
     // Der Preload ist reine Beschleunigung. /process lädt notfalls selbst nach.
     let hotkey = FakeHotkey()
     let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter()
     let client = DictationClient(ergebnis: .success(ergebnis("Trotzdem da.")),
                                  preloadFehler: .notReady("LLM lädt noch"))
     let coordinator = makeCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
-                                      client: client, pasteboard: pasteboard)
+                                      client: client, pasteboard: pasteboard, inserter: inserter)
     await coordinator.start()
 
     hotkey.send(.pressed)
@@ -368,7 +436,10 @@ func gescheiterterPreloadVerhindertDasDiktatNicht() async throws {
     hotkey.send(.released)
     await warteBis { coordinator.session == .idle }
 
-    #expect(pasteboard.geschrieben == ["Trotzdem da."])
+    // M5: Prüfte bis M4 `pasteboard.geschrieben` — der Text wird jetzt direkt eingefügt. Die
+    // Zusicherung des Tests ist unverändert: Ein gescheiterter Preload kostet das Diktat nichts.
+    #expect(inserter.getippt == ["Trotzdem da."])
+    #expect(pasteboard.geschrieben.isEmpty)
 
     await coordinator.stop()
 }
@@ -421,14 +492,19 @@ func stilleMeldetMikrofonproblemUndLaesstDieZwischenablageInRuhe() async throws 
 
 @MainActor
 @Test(.timeLimit(.minutes(1)))
-func unpolierterTextGehtTrotzdemInDieZwischenablage() async throws {
+func unpolierterTextWirdTrotzdemZugestellt() async throws {
     // M2-Vertrag: refined == false heißt "LLM ausgefallen, Rohtext ist da". KEIN Fehler.
+    //
+    // M5: Hieß bis M4 `unpolierterTextGehtTrotzdemInDieZwischenablage`. Die Zusicherung ist
+    // dieselbe geblieben (ein Diktat darf nie verloren gehen), nur der Weg: Im Normalfall wird
+    // direkt eingefügt statt kopiert.
     let hotkey = FakeHotkey()
     let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter()
     let client = DictationClient(ergebnis: .success(
         ergebnis("roher text", refined: false, fallbackReason: "LLM nicht geladen")))
     let coordinator = makeCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
-                                      client: client, pasteboard: pasteboard)
+                                      client: client, pasteboard: pasteboard, inserter: inserter)
     await coordinator.start()
 
     hotkey.send(.pressed)
@@ -436,7 +512,8 @@ func unpolierterTextGehtTrotzdemInDieZwischenablage() async throws {
     hotkey.send(.released)
     await warteBis { coordinator.session == .idle }
 
-    #expect(pasteboard.geschrieben == ["roher text"], "ein Diktat darf nie verloren gehen")
+    #expect(inserter.getippt == ["roher text"], "ein Diktat darf nie verloren gehen")
+    #expect(pasteboard.geschrieben.isEmpty)
     #expect(coordinator.session == .idle, "unpoliert ist kein Fehler")
 
     await coordinator.stop()
@@ -480,9 +557,10 @@ func erneutesDrueckenStartetSofortEineNeueAufnahmeUndVerspaeteteVerarbeitungUebe
     let hotkey = FakeHotkey()
     let recorder = FakeRecorder(samples: sprache())
     let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter()
     let client = GatedDictationClient()
     let coordinator = makeCoordinator(hotkey: hotkey, recorder: recorder,
-                                      client: client, pasteboard: pasteboard)
+                                      client: client, pasteboard: pasteboard, inserter: inserter)
     await coordinator.start()
 
     hotkey.send(.pressed)
@@ -501,12 +579,16 @@ func erneutesDrueckenStartetSofortEineNeueAufnahmeUndVerspaeteteVerarbeitungUebe
     // Erst jetzt die alte, längst überholte Verarbeitung auflösen — NACHDEM die neue Aufnahme
     // bereits läuft. Das ist der eigentliche Test von Regel 6.
     client.freigeben(mit: .success(ergebnis("erstes")))
-    // Die Zwischenablage wird IMMER beschrieben (unverhandelbar — kein Diktat geht verloren),
-    // unabhängig vom Guard. Sobald das eingetroffen ist, ist `beendeVerarbeitung(id:...)` für
-    // diese Verarbeitung garantiert durchgelaufen — sie ruft es synchron direkt danach auf (s.
-    // `verarbeite`, "Kein `await`"-Kommentar) — ein deterministischer Synchronisationspunkt
-    // ohne feste Wartezeit.
-    await warteBis { pasteboard.geschrieben.contains("erstes") }
+    // Der Text wird IMMER zugestellt (unverhandelbar — kein Diktat geht verloren), unabhängig vom
+    // Guard. Hier steht der Anwender noch in derselben App (die `FakeTarget`-Vorgabe wechselt
+    // nicht), also wird direkt eingefügt. Sobald das eingetroffen ist, ist
+    // `beendeVerarbeitung(id:…)` für diese Verarbeitung garantiert durchgelaufen — sie ruft es
+    // synchron direkt danach auf (s. `verarbeite`, "Kein `await`"-Kommentar) — ein
+    // deterministischer Synchronisationspunkt ohne feste Wartezeit.
+    //
+    // M5: Bis M4 lief dieser Synchronisationspunkt über `pasteboard.geschrieben` — die
+    // Zwischenablage ist im Normalfall jetzt nicht mehr der Zustellweg.
+    await warteBis { inserter.getippt.contains("erstes") }
 
     #expect(coordinator.session == .recording,
            "eine verspätet eintreffende alte Verarbeitung darf die laufende neue Aufnahme nicht überschreiben")
@@ -646,13 +728,17 @@ func aeltereVerarbeitungUeberschreibtNichtDenZustandDerNochLaufendenJuengeren() 
     // einzige Rückmeldung dieser App) den Fehler eines längst abgehakten Diktats, oder
     // verschluckt einen echten späteren Fehlschlag, weil der Zustand schon auf `.idle` steht.
     // Beide Ergebnisse hier bewusst ERFOLGREICH (nicht einer davon ein Fehler): So lässt sich
-    // die Reihenfolge über die Zwischenablage beweisen, statt nur über den (weniger
+    // die Reihenfolge über die Zustellung beweisen, statt nur über den (weniger
     // aussagekräftigen) `.failed`-Text.
+    //
+    // M5: Die Reihenfolge wurde bis M4 über `pasteboard.geschrieben` bewiesen — beide Diktate
+    // gehen jetzt (dieselbe App, beschreibbares Textfeld) den direkten Weg über den `inserter`.
     let hotkey = FakeHotkey()
     let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter()
     let client = GatedDictationClient()
     let coordinator = makeCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
-                                      client: client, pasteboard: pasteboard)
+                                      client: client, pasteboard: pasteboard, inserter: inserter)
     await coordinator.start()
 
     // Erstes Diktat: press → release → Verarbeitung #1 (älter) startet und hängt am Gate.
@@ -672,10 +758,10 @@ func aeltereVerarbeitungUeberschreibtNichtDenZustandDerNochLaufendenJuengeren() 
 
     // Die ÄLTERE (#1) zuerst auflösen — bevor die jüngere (#2) fertig ist.
     client.freigeben(mit: .success(ergebnis("ALT")))
-    // Deterministischer Synchronisationspunkt ohne feste Wartezeit: Die Zwischenablage wird
-    // IMMER beschrieben (unverhandelbar), unabhängig davon, ob #1 den Zustand setzen darf.
-    // Sobald "ALT" dort steht, ist `beendeVerarbeitung(id: id1, …)` synchron durchgelaufen.
-    await warteBis { pasteboard.geschrieben.contains("ALT") }
+    // Deterministischer Synchronisationspunkt ohne feste Wartezeit: Der Text wird IMMER zugestellt
+    // (unverhandelbar), unabhängig davon, ob #1 den Zustand setzen darf. Sobald "ALT" getippt ist,
+    // ist `beendeVerarbeitung(id: id1, …)` synchron durchgelaufen.
+    await warteBis { inserter.getippt.contains("ALT") }
 
     // Die eigentliche Prüfung von Finding 3: #2 läuft noch — die Anzeige muss weiterhin
     // ".processing" zeigen, NICHT von der längst überholten #1 auf ".idle" gezogen worden sein.
@@ -687,10 +773,11 @@ func aeltereVerarbeitungUeberschreibtNichtDenZustandDerNochLaufendenJuengeren() 
     await warteBis { coordinator.session == .idle }
 
     #expect(coordinator.session == .idle)
-    // Unverhandelbar: Auch das ÄLTERE, längst überholte Diktat darf nie verloren gehen — sein
-    // Ergebnis landet trotzdem in der Zwischenablage, nur der Zustand folgt ihm nicht mehr.
-    #expect(pasteboard.geschrieben == ["ALT", "NEU"],
+    // Unverhandelbar: Auch das ÄLTERE, längst überholte Diktat darf nie verloren gehen — es wird
+    // trotzdem zugestellt, nur der Zustand folgt ihm nicht mehr.
+    #expect(inserter.getippt == ["ALT", "NEU"],
            "beide Diktate müssen ankommen, in der Reihenfolge, in der sie fertig wurden")
+    #expect(pasteboard.geschrieben.isEmpty)
 
     await coordinator.stop()
 }
@@ -715,12 +802,21 @@ func stopGibtBeiEinerHaengendenVerarbeitungNachDemZeitlimitAufOhneSieAbzubrechen
     // Mutation) hängen, bis die Sicherheitsfreigabe feuert, kehrt es zwar irgendwann zurück,
     // aber die Zwischenablage ist dann schon beschrieben — die Prüfung unten schlägt sichtbar
     // fehl, statt dass der Test ewig hängt.
+    //
+    // M5: Bewiesen wird das jetzt am `inserter` statt an der Zwischenablage — die verspätete
+    // Verarbeitung würde ihren Text direkt einfügen (dieselbe App, beschreibbares Textfeld).
+    // `inserter`/`target` müssen hier ausdrücklich mitgegeben werden: Dieser Test baut den
+    // Koordinator direkt (nicht über `makeCoordinator`), und dessen echte Defaults
+    // (`CGEventTextInserter`/`AXInsertionTarget`) würden im Testlauf in das gerade vorderste
+    // Fenster tippen.
     let sicherheitsFreigabeVerzoegerung = Duration.milliseconds(1_000)
     let hotkey = FakeHotkey()
     let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter()
     let client = GatedDictationClient()
     let coordinator = DictationCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
                                            client: client, pasteboard: pasteboard,
+                                           inserter: inserter, target: FakeTarget(),
                                            beendenZeitlimit: .milliseconds(50),
                                            beendenPollIntervall: .milliseconds(5),
                                            keyDownCounter: FakeKeyDownCounter())
@@ -744,8 +840,9 @@ func stopGibtBeiEinerHaengendenVerarbeitungNachDemZeitlimitAufOhneSieAbzubrechen
     await coordinator.stop()
 
     #expect(coordinator.session == .idle, "stop() muss trotz hängender Verarbeitung zurückkehren")
-    #expect(pasteboard.geschrieben.isEmpty,
+    #expect(inserter.getippt.isEmpty,
            "stop() darf nach Ablauf des Zeitlimits nicht mehr auf das Ergebnis gewartet haben")
+    #expect(pasteboard.geschrieben.isEmpty)
 }
 
 // MARK: - C1 (Review M4, Critical): verlorenes .released darf das Mikrofon nicht für immer offen lassen
@@ -770,9 +867,10 @@ func verwaisteAufnahmeWirdVorNeustartVerworfen() async throws {
     let hotkey = FakeHotkey()
     let recorder = FakeRecorder(samples: sprache())
     let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter()
     let client = DictationClient(ergebnis: .success(ergebnis("zweite Aufnahme")))
     let coordinator = makeCoordinator(hotkey: hotkey, recorder: recorder,
-                                      client: client, pasteboard: pasteboard)
+                                      client: client, pasteboard: pasteboard, inserter: inserter)
     await coordinator.start()
 
     hotkey.send(.pressed)
@@ -791,8 +889,10 @@ func verwaisteAufnahmeWirdVorNeustartVerworfen() async throws {
            "die verwaiste Aufnahme muss verworfen und danach eine frische gestartet worden sein")
     #expect(await recorder.startCount == 2, "nach dem Verwerfen muss sofort neu gestartet werden")
     #expect(client.processCount == 1, "genau EINE Verarbeitung — die der frischen Aufnahme")
-    #expect(pasteboard.geschrieben == ["zweite Aufnahme"],
-           "nur die frische Aufnahme darf in der Zwischenablage landen")
+    // M5: Bis M4 an `pasteboard.geschrieben` geprüft — zugestellt wird jetzt direkt.
+    #expect(inserter.getippt == ["zweite Aufnahme"],
+           "nur die frische Aufnahme darf beim Anwender ankommen")
+    #expect(pasteboard.geschrieben.isEmpty)
 
     await coordinator.stop()
 }
@@ -808,11 +908,14 @@ func wachhundBrichtEineNieLosgelasseneAufnahmeNachDerObergrenzeSelbsttaetigAb() 
     let hotkey = FakeHotkey()
     let recorder = FakeRecorder(samples: sprache())
     let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter()
     let client = DictationClient(ergebnis: .success(ergebnis("darf nicht kommen")))
-    let coordinator = DictationCoordinator(hotkey: hotkey, recorder: recorder, client: client,
-                                           pasteboard: pasteboard,
-                                           aufnahmeObergrenze: .milliseconds(30),
-                                           keyDownCounter: FakeKeyDownCounter())
+    // M5: `inserter`/`target` ausdrücklich mitgeben — dieser Test baut den Koordinator direkt
+    // (wegen der kurzen `aufnahmeObergrenze`), und die echten Defaults würden im Testlauf in das
+    // vorderste Fenster tippen.
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: recorder, client: client,
+                                      pasteboard: pasteboard, inserter: inserter,
+                                      aufnahmeObergrenze: .milliseconds(30))
     await coordinator.start()
 
     hotkey.send(.pressed)
@@ -828,6 +931,7 @@ func wachhundBrichtEineNieLosgelasseneAufnahmeNachDerObergrenzeSelbsttaetigAb() 
     #expect(await recorder.laeuft == false, "das Mikrofon muss nach dem Abbruch wieder zu sein")
     #expect(client.processCount == 0, "eine abgebrochene Aufnahme darf die Engine nie erreichen")
     #expect(pasteboard.geschrieben.isEmpty, "die Zwischenablage darf nie überschrieben werden")
+    #expect(inserter.getippt.isEmpty, "eine abgebrochene Aufnahme darf nirgends getippt werden")
 
     await coordinator.stop()
 }
@@ -873,10 +977,11 @@ func normalesDiktatBleibtUnberuehrtWennDerZaehlerWaehrendDerAufnahmeNichtSteigt(
     // Zeichentasten), darf die neue Prüfung ein normales Diktat nicht beeinträchtigen.
     let hotkey = FakeHotkey()
     let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter()
     let client = DictationClient(ergebnis: .success(ergebnis("normales Diktat")))
     let counter = FakeKeyDownCounter()
     let coordinator = makeCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
-                                      client: client, pasteboard: pasteboard,
+                                      client: client, pasteboard: pasteboard, inserter: inserter,
                                       keyDownCounter: counter)
     await coordinator.start()
 
@@ -885,7 +990,9 @@ func normalesDiktatBleibtUnberuehrtWennDerZaehlerWaehrendDerAufnahmeNichtSteigt(
     hotkey.send(.released)
     await warteBis { coordinator.session == .idle }
 
-    #expect(pasteboard.geschrieben == ["normales Diktat"])
+    // M5: Bis M4 an `pasteboard.geschrieben` geprüft — zugestellt wird jetzt direkt.
+    #expect(inserter.getippt == ["normales Diktat"])
+    #expect(pasteboard.geschrieben.isEmpty)
     #expect(client.processCount == 1)
 
     await coordinator.stop()
@@ -942,9 +1049,10 @@ func alreadyRecordingBeimStartSchliesstDasMikrofonUndLegtDasDiktatNichtDauerhaft
     let hotkey = FakeHotkey()
     let recorder = FakeRecorder(samples: sprache())
     let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter()
     let client = DictationClient(ergebnis: .success(ergebnis("frisches Diktat")))
     let coordinator = makeCoordinator(hotkey: hotkey, recorder: recorder,
-                                      client: client, pasteboard: pasteboard)
+                                      client: client, pasteboard: pasteboard, inserter: inserter)
     await coordinator.start()
 
     try await recorder.start()
@@ -967,7 +1075,9 @@ func alreadyRecordingBeimStartSchliesstDasMikrofonUndLegtDasDiktatNichtDauerhaft
     hotkey.send(.released)
     await warteBis { coordinator.session == .idle }
 
-    #expect(pasteboard.geschrieben == ["frisches Diktat"])
+    // M5: Bis M4 an `pasteboard.geschrieben` geprüft — zugestellt wird jetzt direkt.
+    #expect(inserter.getippt == ["frisches Diktat"])
+    #expect(pasteboard.geschrieben.isEmpty)
     #expect(client.processCount == 1)
 
     await coordinator.stop()
@@ -1049,6 +1159,402 @@ func hotkeyDerNieStartetWirdBeimStartAlsAusfallGemeldet() async throws {
     await warteBis { if case .failed = coordinator.session { return true }; return false }
 
     #expect(coordinator.session == .failed("Hotkey inaktiv — Eingabeüberwachung fehlt"))
+
+    await coordinator.stop()
+}
+
+// MARK: - M5: die vier Bedingungen der Zustellung
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func normalfallTipptDirektUndLaesstDieZwischenablageInRuhe() async throws {
+    // Der Fall, für den M5 gebaut wird — und die wichtigste Zusicherung des Anwenders:
+    // "Diktieren und Kopieren dürfen sich nicht gegenseitig stören."
+    let hotkey = FakeHotkey()
+    let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter()
+    let target = FakeTarget(app: 42, ziel: .beschreibbaresTextfeld)
+    let client = DictationClient(ergebnis: .success(ergebnis("Guten Morgen.")))
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
+                                      client: client, pasteboard: pasteboard,
+                                      inserter: inserter, target: target)
+    await coordinator.start()
+
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+    await warteBis { coordinator.session == .idle }
+
+    #expect(inserter.getippt == ["Guten Morgen."], "der Text muss direkt eingefügt werden")
+    #expect(pasteboard.geschrieben.isEmpty,
+            "die Zwischenablage bleibt im Normalfall UNANGETASTET — Entscheidung des Anwenders")
+
+    await coordinator.stop()
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func appWechselWaehrendDerVerarbeitungVerhindertDasTippen() async throws {
+    // Der gefährlichste Fall: Zwischen Loslassen und fertigem Text vergehen ~6 s. Klickt der
+    // Anwender in dieser Zeit in ein anderes Fenster, würde ungeprüftes Tippen sein Diktat in
+    // einen Slack-Chat oder ein Suchfeld schreiben.
+    let hotkey = FakeHotkey()
+    let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter()
+    let target = FakeTarget(app: 42, ziel: .beschreibbaresTextfeld)
+    let client = DictationClient(ergebnis: .success(ergebnis("Geheimer Text.")))
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
+                                      client: client, pasteboard: pasteboard,
+                                      inserter: inserter, target: target)
+    await coordinator.start()
+
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    // Der Anwender klickt woanders hin, WÄHREND verarbeitet wird.
+    target.wechsleApp(zu: 99)
+    hotkey.send(.released)
+    await warteBis { coordinator.session == .inZwischenablage }
+
+    #expect(inserter.getippt.isEmpty, "NIEMALS in ein fremdes Fenster tippen")
+    #expect(pasteboard.geschrieben == ["Geheimer Text."],
+            "der Text darf nicht verloren gehen — er landet in der Zwischenablage")
+
+    await coordinator.stop()
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func ohneTextfeldImFokusWirdNichtGetippt() async throws {
+    let hotkey = FakeHotkey()
+    let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter()
+    let target = FakeTarget(app: 42, ziel: .keinTextfeld)
+    let client = DictationClient(ergebnis: .success(ergebnis("Text.")))
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
+                                      client: client, pasteboard: pasteboard,
+                                      inserter: inserter, target: target)
+    await coordinator.start()
+
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+    await warteBis { coordinator.session == .inZwischenablage }
+
+    #expect(inserter.getippt.isEmpty, "ohne Textfeld gibt es keinen Ort zum Tippen")
+    #expect(pasteboard.geschrieben == ["Text."])
+
+    await coordinator.stop()
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func inEinPasswortfeldWirdNiemalsGetippt() async throws {
+    // Sicherheitsregel, nicht verhandelbar.
+    let hotkey = FakeHotkey()
+    let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter()
+    let target = FakeTarget(app: 42, ziel: .passwortfeld)
+    let client = DictationClient(ergebnis: .success(ergebnis("Text.")))
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
+                                      client: client, pasteboard: pasteboard,
+                                      inserter: inserter, target: target)
+    await coordinator.start()
+
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+    await warteBis { coordinator.session == .inZwischenablage }
+
+    #expect(inserter.getippt.isEmpty, "in ein Passwortfeld tippt TypeLess GRUNDSÄTZLICH nicht")
+
+    await coordinator.stop()
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func ohneBedienungshilfenWirdNichtGetippt() async throws {
+    // `.unbekannt` heißt: Das Recht fehlt, TypeLess kann es nicht wissen. Dann wird nicht
+    // geraten — würde getippt, käme nichts an, und das Diktat wäre spurlos weg.
+    let hotkey = FakeHotkey()
+    let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter()
+    let target = FakeTarget(app: 42, ziel: .unbekannt)
+    let client = DictationClient(ergebnis: .success(ergebnis("Text.")))
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
+                                      client: client, pasteboard: pasteboard,
+                                      inserter: inserter, target: target)
+    await coordinator.start()
+
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+    await warteBis { coordinator.session == .inZwischenablage }
+
+    #expect(inserter.getippt.isEmpty)
+    #expect(pasteboard.geschrieben == ["Text."], "ohne Recht ist die Zwischenablage der einzige Weg")
+
+    await coordinator.stop()
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func scheiterndesTippenVerliertDasDiktatNicht() async throws {
+    let hotkey = FakeHotkey()
+    let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter(fehler: .ereignisNichtErzeugbar)
+    let target = FakeTarget(app: 42, ziel: .beschreibbaresTextfeld)
+    let client = DictationClient(ergebnis: .success(ergebnis("Wichtiger Text.")))
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
+                                      client: client, pasteboard: pasteboard,
+                                      inserter: inserter, target: target)
+    await coordinator.start()
+
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+    await warteBis { coordinator.session == .inZwischenablage }
+
+    #expect(pasteboard.geschrieben == ["Wichtiger Text."],
+            "ein Diktat darf NIE verloren gehen — auch nicht, wenn das Tippen scheitert")
+
+    await coordinator.stop()
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func engineFehlerLaesstDieZwischenablageUnangetastet() async throws {
+    // Die M4-Regel, die BLEIBT: Bei einem echten Fehler ist der alte Inhalt der Zwischenablage
+    // besser als Leere.
+    let hotkey = FakeHotkey()
+    let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter()
+    let client = DictationClient(ergebnis: .failure(.unreachable))
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
+                                      client: client, pasteboard: pasteboard, inserter: inserter)
+    await coordinator.start()
+
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+    await warteBis { if case .failed = coordinator.session { true } else { false } }
+
+    #expect(pasteboard.geschrieben.isEmpty, "bei einem echten Fehler bleibt sie unangetastet")
+    #expect(inserter.getippt.isEmpty)
+
+    await coordinator.stop()
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func jedesDiktatPruftSeinenEigenenGemerktenFokus() async throws {
+    // Die GEFALLENE M4-Regel. In M4 galt: "Die Zwischenablage bekommt JEDES Ergebnis, auch das
+    // einer überholten Verarbeitung." Mit automatischem Einfügen wäre das fatal — ein überholtes
+    // Diktat würde in das Fenster tippen, in dem der Anwender INZWISCHEN steht.
+    //
+    // Neu: Jedes Diktat merkt sich beim Fn-Druck SEINE Ziel-App und prüft beim Zustellen genau
+    // diese. Hier: Das erste Diktat wird in App 42 gesprochen; danach wechselt der Anwender in
+    // App 99 und diktiert dort erneut. Das erste Ergebnis darf NICHT in App 99 getippt werden.
+    //
+    // I1 (Review zu Task 4, Important): Dieser Test brauchte ZWEI Diktate — vorher drückte er nur
+    // einmal, wechselte die App und ließ los. Damit war er ein Duplikat von
+    // `appWechselWaehrendDerVerarbeitungVerhindertDasTippen`, und der eigentliche Unterschied
+    // ("EIGENER gemerkter Fokus" statt "Fokus der JÜNGSTEN Verarbeitung") blieb unsichtbar, weil es
+    // nur EINE Verarbeitung gab: Ersetzte man die Übergabe in `verarbeite` durch
+    // `zielApp: self?.zielAppBeimDruck ?? zielApp` — genau das, was ein späterer "Aufräum"-Refactor
+    // täte —, blieb alles grün. Erst mit einer zweiten, JÜNGEREN Verarbeitung (die
+    // `zielAppBeimDruck` auf 99 gesetzt hat) unterscheiden sich die beiden Ausdrücke: Der überholte
+    // Erste läge dann bei 99 == 99 und tippte in die FREMDE App. Torgesteuerter Client, damit beide
+    // Verarbeitungen wirklich gleichzeitig offen sind — Muster wie in
+    // `aeltereVerarbeitungUeberschreibtNichtDenZustandDerNochLaufendenJuengeren`.
+    let hotkey = FakeHotkey()
+    let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter()
+    let target = FakeTarget(app: 42, ziel: .beschreibbaresTextfeld)
+    let client = GatedDictationClient()
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
+                                      client: client, pasteboard: pasteboard,
+                                      inserter: inserter, target: target)
+    await coordinator.start()
+
+    // Erstes Diktat in App 42 — die Verarbeitung (#1) startet und hängt am Tor.
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+    var iterator = client.processGestartet.makeAsyncIterator()
+    _ = await iterator.next()
+
+    // Der Anwender wechselt nach App 99 und diktiert DORT erneut, während #1 noch läuft. Damit
+    // steht `zielAppBeimDruck` jetzt auf 99 — der überholte Erste darf sich davon nicht
+    // beeindrucken lassen.
+    target.wechsleApp(zu: 99)
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+    _ = await iterator.next()
+
+    // Das ÜBERHOLTE erste Ergebnis zuerst auflösen: Es gehört nach App 42, der Anwender steht aber
+    // in App 99.
+    client.freigeben(mit: .success(ergebnis("Erstes Diktat.")))
+    // Synchronisationspunkt ohne feste Wartezeit, der unter BEIDEN Ausgängen greift (richtig:
+    // Zwischenablage; mutiert: getippt) — so kann dieser Test unter der Mutation nicht hängen,
+    // sondern wird sichtbar rot.
+    await warteBis { !pasteboard.geschrieben.isEmpty || !inserter.getippt.isEmpty }
+
+    #expect(inserter.getippt.isEmpty,
+            "das Diktat aus App 42 darf niemals in App 99 getippt werden — auch nicht, weil die JÜNGERE Verarbeitung dort gedrückt wurde")
+    #expect(pasteboard.geschrieben == ["Erstes Diktat."],
+            "der überholte Text darf nicht verloren gehen — er landet in der Zwischenablage")
+
+    // Gegenprobe: Das ZWEITE Diktat gehört nach App 99, dort steht der Anwender — es wird direkt
+    // eingefügt. Das belegt, dass die Zwischenablage oben nicht aus einem anderen Grund kam.
+    client.freigeben(mit: .success(ergebnis("Zweites Diktat.")))
+    await warteBis { coordinator.session == .idle }
+
+    #expect(inserter.getippt == ["Zweites Diktat."],
+            "das zweite Diktat gehört in App 99 — dort steht der Anwender, dort wird getippt")
+    #expect(pasteboard.geschrieben == ["Erstes Diktat."], "sonst blieb sie unangetastet")
+
+    await coordinator.stop()
+}
+
+// MARK: - Abschluss-Review M5: dasselbe Textfeld, nicht nur dieselbe App
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func anderesTextfeldInDerselbenAppVerhindertDasTippen() async throws {
+    // Der Fall, den die App-Prüfung allein NICHT sieht: Der Anwender diktiert in ein Textfeld im
+    // Browser, drückt in den ~6 s Wartezeit ⌘L und steht in der Adressleiste. Gleiche
+    // Prozesskennung (42), beschreibbares Textfeld, kein Passwortfeld — alle vier bisherigen
+    // Bedingungen erfüllt. Ohne die fünfte tippte TypeLess das Diktat in die Adressleiste.
+    //
+    // Entscheidung des Anwenders: "Wenn ich diktiere, muss ich mit dem Cursor schon in irgendein
+    // Textfeld von irgendeiner Anwendung geklickt haben. Dort soll der Text dann eingefügt werden."
+    let hotkey = FakeHotkey()
+    let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter()
+    // Feld 1: das Textfeld auf der Seite. Die App bleibt die ganze Zeit dieselbe.
+    let target = FakeTarget(app: 42, ziel: .beschreibbaresTextfeld, feld: 1)
+    let client = DictationClient(ergebnis: .success(ergebnis("Vertraulicher Satz.")))
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
+                                      client: client, pasteboard: pasteboard,
+                                      inserter: inserter, target: target)
+    await coordinator.start()
+
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    // ⌘L: gleiche App, ANDERES Feld (die Adressleiste) — sie ist ebenfalls beschreibbar.
+    target.wechsleFeld(zu: 2)
+    hotkey.send(.released)
+
+    // Synchronisationspunkt, der unter BEIDEN Ausgängen greift (richtig: Zwischenablage; mutiert:
+    // getippt) — so wird dieser Test unter der Mutationsprobe sichtbar ROT und hängt nicht.
+    await warteBis { !pasteboard.geschrieben.isEmpty || !inserter.getippt.isEmpty }
+
+    #expect(inserter.getippt.isEmpty,
+            "das Diktat gehört in das Feld, in dem gesprochen wurde — NIEMALS in die Adressleiste")
+    #expect(pasteboard.geschrieben == ["Vertraulicher Satz."],
+            "der Text darf nicht verloren gehen — er landet in der Zwischenablage")
+    #expect(coordinator.session == .inZwischenablage,
+            "kein Fehler — das Menüsymbol muss sagen: jetzt ist ⌘V dran")
+
+    await coordinator.stop()
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func dasselbeTextfeldWirdWieBisherDirektGetippt() async throws {
+    // Regressionsschutz für den NORMALFALL: Der Anwender bleibt in seinem Feld stehen. Dann muss
+    // die fünfte Bedingung schweigen — sonst hätte sie den Alltag kaputtgemacht (jedes Diktat
+    // ginge unnötig in die Zwischenablage), und der Test oben wäre trivial grün.
+    let hotkey = FakeHotkey()
+    let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter()
+    let target = FakeTarget(app: 42, ziel: .beschreibbaresTextfeld, feld: 1)
+    let client = DictationClient(ergebnis: .success(ergebnis("Guten Morgen.")))
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
+                                      client: client, pasteboard: pasteboard,
+                                      inserter: inserter, target: target)
+    await coordinator.start()
+
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    // Der Anwender rührt sich nicht: dieselbe App, DASSELBE Feld.
+    hotkey.send(.released)
+    await warteBis { coordinator.session == .idle }
+
+    #expect(inserter.getippt == ["Guten Morgen."],
+            "im selben Feld wird direkt getippt — die neue Prüfung darf den Normalfall nicht stören")
+    #expect(pasteboard.geschrieben.isEmpty,
+            "die Zwischenablage bleibt UNANGETASTET — Entscheidung des Anwenders")
+
+    await coordinator.stop()
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func ohneGemerktesTextfeldWirdNichtGetippt() async throws {
+    // "Nichts gemerkt" ist kein Freibrief: Konnte TypeLess beim Fn-Druck keine Identität ermitteln
+    // (kein Recht, kein fokussiertes Element), darf beim Zustellen NICHT geraten werden — auch dann
+    // nicht, wenn inzwischen wieder ein beschreibbares Textfeld gemeldet wird. Ohne das `guard let`
+    // in `stelleZu` liefen zwei `nil` als "gleich" durch und TypeLess tippte in ein Feld, das es
+    // beim Sprechen gar nicht kannte.
+    let hotkey = FakeHotkey()
+    let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter()
+    let target = FakeTarget(app: 42, ziel: .beschreibbaresTextfeld, feld: nil)
+    let client = DictationClient(ergebnis: .success(ergebnis("Text.")))
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
+                                      client: client, pasteboard: pasteboard,
+                                      inserter: inserter, target: target)
+    await coordinator.start()
+
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+    await warteBis { !pasteboard.geschrieben.isEmpty || !inserter.getippt.isEmpty }
+
+    #expect(inserter.getippt.isEmpty, "ohne gemerktes Feld wird nicht geraten")
+    #expect(pasteboard.geschrieben == ["Text."], "der Text landet sicher in der Zwischenablage")
+    #expect(coordinator.session == .inZwischenablage)
+
+    await coordinator.stop()
+}
+
+// MARK: - M1 (Abschluss-Review M5, Minor): leerer Text ist kein Erfolg
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func leererTextAusDerEngineWirdGemeldetUndNichtAlsErfolgVerkauft() async throws {
+    // M1 (Abschluss-Review M5): Liefert die Engine einen LEEREN Text (der Anwender hat nichts
+    // Verständliches gesagt; das Mikrofon nahm nur Rauschen auf, an dem das Stille-Gate nicht
+    // anschlug), lief das bis M5 als `.eingefuegt` durch und endete auf `.idle` — der Anwender
+    // sah damit exakt dasselbe wie nach einem GEGLÜCKTEN Diktat: nichts. Ohne Overlay und ohne
+    // Ton ist das Menüsymbol seine einzige Rückmeldung; sie muss diesen Unterschied machen.
+    //
+    // Es geht dabei kein Text verloren (es gibt keinen) — deshalb bleibt die Zwischenablage
+    // unangetastet, und es wird auch nichts getippt.
+    let hotkey = FakeHotkey()
+    let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter()
+    let coordinator = makeCoordinator(
+        hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
+        client: DictationClient(ergebnis: .success(ergebnis(""))),
+        pasteboard: pasteboard, inserter: inserter)
+    await coordinator.start()
+
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+    await warteBis { if case .failed = coordinator.session { return true }; return false }
+
+    #expect(coordinator.session == .failed("Nichts erkannt"),
+            """
+            leerer Text darf NICHT wie ein geglücktes Diktat aussehen (.idle) — der Anwender \
+            hat keine andere Rückmeldung als das Menüsymbol
+            """)
+    #expect(inserter.getippt.isEmpty, "es gibt nichts zu tippen")
+    #expect(pasteboard.geschrieben.isEmpty,
+            "die Zwischenablage bleibt unangetastet — der alte Inhalt ist besser als Leere")
 
     await coordinator.stop()
 }
