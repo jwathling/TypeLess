@@ -6,7 +6,12 @@
 # würden die Rechte dem Terminal erteilt statt TypeLess.
 set -euo pipefail
 
-cd "$(dirname "$0")/../apps/macos"
+# Einmal absolut auflösen, BEVOR wir wegcd'en — spätere Schritte (z. B. die Engine-Einbettung)
+# brauchen den Repo-Pfad, laufen aber mit cwd=apps/macos; ein $(dirname "$0") an dieser Stelle
+# wäre nach dem cd relativ zum FALSCHEN Verzeichnis.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+cd "$SCRIPT_DIR/../apps/macos"
 
 CONFIG="${1:-debug}"
 APP="TypeLess.app"
@@ -40,6 +45,28 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+
+# --- Engine ins Bündel einbetten (ausgelieferter Betrieb ohne Entwickler-Setup) ---
+# uv baut daraus beim ersten Start die Python-Umgebung EXTERN unter Application Support auf
+# (UV_PROJECT_ENVIRONMENT) — dieses Verzeichnis hier bleibt schreibgeschützt und signiert.
+ENGINE_SRC="$(cd "$SCRIPT_DIR/../engine" && pwd)"
+ENGINE_DST="$APP/Contents/Resources/engine"
+echo "== Engine einbetten aus $ENGINE_SRC =="
+rm -rf "$ENGINE_DST"
+mkdir -p "$ENGINE_DST"
+# Nur die zur Laufzeit nötigen Teile — keine .venv, kein __pycache__, keine Tests.
+cp -R "$ENGINE_SRC/typeless_engine" "$ENGINE_DST/typeless_engine"
+cp "$ENGINE_SRC/pyproject.toml" "$ENGINE_SRC/uv.lock" "$ENGINE_SRC/README.md" "$ENGINE_DST/"
+find "$ENGINE_DST" -name "__pycache__" -type d -prune -exec rm -rf {} +
+
+UV_BIN="$(command -v uv || true)"
+if [ -z "$UV_BIN" ]; then
+  echo "FEHLER: uv nicht gefunden (command -v uv leer). uv installieren und erneut bauen." >&2
+  exit 1
+fi
+cp "$UV_BIN" "$ENGINE_DST/uv"
+chmod +x "$ENGINE_DST/uv"
+echo "   eingebettet: uv ($("$ENGINE_DST/uv" --version)) + typeless_engine + uv.lock"
 
 # macOS bindet Mikrofon-/Bedienungshilfen-/Eingabeüberwachungs-Rechte an die SIGNATUR-Identität.
 # Eine Ad-hoc-Signatur (`--sign -`) erzeugt bei JEDEM Neubau eine neue Identität — die Rechte
