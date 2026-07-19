@@ -15,6 +15,7 @@ env -i HOME="$HOME" PATH="/usr/bin:/bin" \
     UV_PROJECT_ENVIRONMENT="$WORK/runtime" \
     UV_CACHE_DIR="$WORK/uv-cache" \
     HF_HOME="$WORK/models" \
+    PYTHONPYCACHEPREFIX="$WORK/pycache" \
     "$ENGINE/uv" run --frozen --project "$ENGINE" --extra mlx --extra server \
     python -m typeless_engine.server &
 PID=$!
