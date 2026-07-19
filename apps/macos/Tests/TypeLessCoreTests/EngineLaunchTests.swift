@@ -36,5 +36,6 @@ import Testing
         "UV_PROJECT_ENVIRONMENT": "/AS/TypeLess/runtime",
         "UV_CACHE_DIR": "/AS/TypeLess/uv-cache",
         "HF_HOME": "/AS/TypeLess/models",
+        "PYTHONPYCACHEPREFIX": "/AS/TypeLess/pycache",
     ])
 }

@@ -45,6 +45,10 @@ public struct EngineLaunch: Sendable, Equatable {
                 "UV_PROJECT_ENVIRONMENT": appSupportDirectory + "/runtime",
                 "UV_CACHE_DIR": appSupportDirectory + "/uv-cache",
                 "HF_HOME": appSupportDirectory + "/models",
+                // Bytecode-Cache (__pycache__/*.pyc) beim Modul-Import extern ablegen — sonst
+                // schreibt Python sie ins signierte, schreibgeschützte Bündel und bricht dessen
+                // Code-Signatur (nicht PYTHONDONTWRITEBYTECODE, das schaltete den Cache ganz ab).
+                "PYTHONPYCACHEPREFIX": appSupportDirectory + "/pycache",
             ])
     }
 }
