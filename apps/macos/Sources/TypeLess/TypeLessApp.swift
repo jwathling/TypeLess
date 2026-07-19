@@ -13,20 +13,30 @@ struct TypeLessApp: App {
         // Die einzige Stelle, die konkrete Typen kennt (Komposition).
         let settings = UserDefaultsSettingsStore()
         let client = HTTPSidecarClient(socketPath: settings.socketPath)
-        // TODO(M8-Verteilung Teil3, Composition-Root): `bundledEngineDirectory`/
-        // `appSupportDirectory` fehlen hier noch — bis dahin bewusst der bisherige
-        // Entwicklungs-Start (`bundledEngineDirectory: nil`), Verhalten unverändert zu vorher.
+
+        // Application-Support-Wurzel für Laufzeit-Umgebung, uv-Cache und Modelle. Beschreibbar,
+        // liegt außerhalb des (read-only, signierten) Bündels und überlebt App-Updates.
+        let appSupport = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("TypeLess", isDirectory: true)
+        try? FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
+
+        // Liegt eine gebündelte Engine vor? (nur dann läuft die App „ausgeliefert").
+        let bundledEngineDir = Bundle.main.resourceURL?
+            .appendingPathComponent("engine", isDirectory: true).path
+        let bundledUv = bundledEngineDir.map { $0 + "/uv" }
+        let isBundled = bundledUv.map { FileManager.default.isExecutableFile(atPath: $0) } ?? false
+
         let launch = EngineLaunch.resolve(
-            bundledEngineDirectory: nil,
+            bundledEngineDirectory: isBundled ? bundledEngineDir : nil,
             uvPath: settings.uvPath,
             engineDirectory: settings.engineDirectory,
             socketPath: settings.socketPath,
-            appSupportDirectory: settings.engineDirectory)
+            appSupportDirectory: appSupport.path)
+
         let lifecycle = DefaultSidecarLifecycle(
-            client: client,
-            runner: FoundationProcessRunner(),
-            launch: launch,
-            socketPath: settings.socketPath)
+            client: client, runner: FoundationProcessRunner(),
+            launch: launch, socketPath: settings.socketPath)
 
         let state = AppState(lifecycle: lifecycle, client: client,
                              permissions: SystemPermissionsService())
