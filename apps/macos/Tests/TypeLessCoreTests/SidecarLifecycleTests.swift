@@ -56,6 +56,7 @@ final class SpyProcessRunner: ProcessRunner, @unchecked Sendable {
     private let lock = NSLock()
     private(set) var startedCommands: [[String]] = []
     private(set) var startedEnvironments: [[String: String]] = []
+    private(set) var startedWorkingDirectories: [String] = []
     let handle: SpyProcessHandle
 
     /// Feuert, sobald ``run(executable:arguments:workingDirectory:environment:)`` aufgerufen
@@ -74,6 +75,7 @@ final class SpyProcessRunner: ProcessRunner, @unchecked Sendable {
         lock.lock()
         startedCommands.append([executable] + arguments)
         startedEnvironments.append(environment)
+        startedWorkingDirectories.append(workingDirectory)
         lock.unlock()
         startedContinuation.yield()
         return handle
@@ -116,11 +118,22 @@ func health(_ status: String, error: String? = nil) -> HealthState {
                 sttModel: "whisper", llmModel: "qwen", error: error)
 }
 
+/// Baut ein `EngineLaunch` mit den bisherigen Test-Default-Werten (Entwicklungs-Start:
+/// `/bin/echo run python -m typeless_engine.server` im Temp-Verzeichnis) — für Tests, denen es
+/// nicht auf den konkreten Startbefehl ankommt, nur auf die übrige Lifecycle-Logik.
+func makeLaunch(executable: String = "/bin/echo",           // existiert garantiert
+                workingDirectory: String = FileManager.default.temporaryDirectory.path,
+                socketPath: String = "/tmp/typeless-test.sock") -> EngineLaunch {
+    EngineLaunch(executable: executable,
+                arguments: ["run", "python", "-m", "typeless_engine.server"],
+                workingDirectory: workingDirectory,
+                environment: ["TYPELESS_SOCKET_PATH": socketPath])
+}
+
 func makeLifecycle(client: SidecarClient, runner: ProcessRunner,
                     socketPath: String = "/tmp/typeless-test.sock") -> DefaultSidecarLifecycle {
     DefaultSidecarLifecycle(client: client, runner: runner,
-                            engineDirectory: FileManager.default.temporaryDirectory.path,
-                            uvPath: "/bin/echo",          // existiert garantiert
+                            launch: makeLaunch(socketPath: socketPath),
                             socketPath: socketPath,
                             readyTimeout: .milliseconds(500),
                             pollInterval: .milliseconds(10),
@@ -206,27 +219,17 @@ func makeLifecycle(client: SidecarClient, runner: ProcessRunner,
     }
 }
 
-@Test func meldetFehlendesEngineVerzeichnis() async throws {
-    let lifecycle = DefaultSidecarLifecycle(
-        client: ScriptedClient([.failure(.unreachable)]),
-        runner: SpyProcessRunner(),
-        engineDirectory: "/gibt/es/nicht",
-        uvPath: "/bin/echo",
-        socketPath: "/tmp/typeless-test.sock",
-        readyTimeout: .milliseconds(500),
-        pollInterval: .milliseconds(10))
-
-    await #expect(throws: LifecycleError.engineDirectoryMissing("/gibt/es/nicht")) {
-        _ = try await lifecycle.start()
-    }
-}
+// `meldetFehlendesEngineVerzeichnis` (Prüfung von `engineDirectory` vor dem Spawn) entfällt hier:
+// Diese Validierung wandert mit `EngineLaunch` aus `DefaultSidecarLifecycle` heraus — im
+// gebündelten Fall stellt das Anlegen unter Application Support (Task 3, Composition-Root) die
+// Existenz sicher, im Dev-Fall das vorhandene Repo. `LifecycleError.engineDirectoryMissing` bleibt
+// als Fall bestehen (s. `AppState`-Fehlerabbildung), wird aber im Start-Zweig nicht mehr geworfen.
 
 @Test func meldetFehlendesUv() async throws {
     let lifecycle = DefaultSidecarLifecycle(
         client: ScriptedClient([.failure(.unreachable)]),
         runner: SpyProcessRunner(),
-        engineDirectory: FileManager.default.temporaryDirectory.path,
-        uvPath: "/gibt/es/nicht/uv",
+        launch: makeLaunch(executable: "/gibt/es/nicht/uv"),
         socketPath: "/tmp/typeless-test.sock",
         readyTimeout: .milliseconds(500),
         pollInterval: .milliseconds(10))
@@ -234,6 +237,37 @@ func makeLifecycle(client: SidecarClient, runner: ProcessRunner,
     await #expect(throws: LifecycleError.uvMissing("/gibt/es/nicht/uv")) {
         _ = try await lifecycle.start()
     }
+}
+
+// Step 1 (Task 2 Brief): Belegt, dass `start()` im Spawn-Zweig ausschließlich die Werte aus
+// `launch` verwendet (nicht mehr eigene `engineDirectory`/`uvPath`-Felder) — Exekutable,
+// Argumente, Arbeitsverzeichnis und Umgebung wandern unverändert bis zu `runner.run()` durch.
+// Abweichend vom Brief-Beispiel wird als Exekutable `/bin/echo` verwendet (real vorhanden) statt
+// des dort nur illustrativen `/App/Contents/Resources/engine/uv` — `start()` prüft die
+// Exekutable-Eigenschaft echt über `FileManager.isExecutableFile`, ein nicht existierender Pfad
+// würde vor dem Spawn mit `uvMissing` scheitern statt den Spawn-Zweig zu erreichen.
+@Test func startVerwendetEngineLaunchWerte() async throws {
+    let launch = EngineLaunch(
+        executable: "/bin/echo",
+        arguments: ["run", "--frozen", "--project", "/App/Contents/Resources/engine",
+                    "--extra", "mlx", "--extra", "server", "python", "-m", "typeless_engine.server"],
+        workingDirectory: "/AS/TypeLess",
+        environment: ["TYPELESS_SOCKET_PATH": "/sock/typeless.sock",
+                      "UV_PROJECT_ENVIRONMENT": "/AS/TypeLess/runtime"])
+    let runner = SpyProcessRunner()
+    let client = ScriptedClient([.failure(.unreachable), .success(health("ready"))])
+    let lifecycle = DefaultSidecarLifecycle(
+        client: client, runner: runner, launch: launch, socketPath: "/sock/typeless.sock",
+        readyTimeout: .seconds(1), pollInterval: .milliseconds(5))
+
+    let ownership = try await lifecycle.start()
+
+    #expect(ownership == .spawned)
+    let command = try #require(runner.startedCommands.first)
+    #expect(command.first == "/bin/echo")
+    #expect(Array(command.dropFirst()) == launch.arguments)
+    #expect(runner.startedWorkingDirectories.first == "/AS/TypeLess")
+    #expect(runner.startedEnvironments.first?["UV_PROJECT_ENVIRONMENT"] == "/AS/TypeLess/runtime")
 }
 
 // Finding 1 (Review, Task 4): Scheitert `waitForReady()` im Spawn-Zweig, blieb der selbst
