@@ -13,11 +13,19 @@ struct TypeLessApp: App {
         // Die einzige Stelle, die konkrete Typen kennt (Komposition).
         let settings = UserDefaultsSettingsStore()
         let client = HTTPSidecarClient(socketPath: settings.socketPath)
+        // TODO(M8-Verteilung Teil3, Composition-Root): `bundledEngineDirectory`/
+        // `appSupportDirectory` fehlen hier noch — bis dahin bewusst der bisherige
+        // Entwicklungs-Start (`bundledEngineDirectory: nil`), Verhalten unverändert zu vorher.
+        let launch = EngineLaunch.resolve(
+            bundledEngineDirectory: nil,
+            uvPath: settings.uvPath,
+            engineDirectory: settings.engineDirectory,
+            socketPath: settings.socketPath,
+            appSupportDirectory: settings.engineDirectory)
         let lifecycle = DefaultSidecarLifecycle(
             client: client,
             runner: FoundationProcessRunner(),
-            engineDirectory: settings.engineDirectory,
-            uvPath: settings.uvPath,
+            launch: launch,
             socketPath: settings.socketPath)
 
         let state = AppState(lifecycle: lifecycle, client: client,

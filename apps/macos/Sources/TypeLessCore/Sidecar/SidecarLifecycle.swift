@@ -41,8 +41,10 @@ public protocol SidecarLifecycle: Sendable {
 public actor DefaultSidecarLifecycle: SidecarLifecycle {
     private let client: SidecarClient
     private let runner: ProcessRunner
-    private let engineDirectory: String
-    private let uvPath: String
+    /// Der Startbefehl (Exekutable, Argumente, Arbeitsverzeichnis, Umgebung) für den Spawn-Zweig
+    /// — von außen gereicht (s. `EngineLaunch.resolve`, Composition-Root), damit dieser Typ weder
+    /// weiß noch entscheiden muss, ob die Engine gebündelt oder aus dem Entwicklungs-Repo startet.
+    private let launch: EngineLaunch
     /// Der Socket-Pfad, auf dem der gespawnte Sidecar lauschen soll — wird dem Kindprozess als
     /// `TYPELESS_SOCKET_PATH` mitgegeben (s. `engine/typeless_engine/config.py`). Der Lifecycle
     /// muss ihn kennen, damit derselbe Pfad, auf den `client` verbindet, auch tatsächlich beim
@@ -60,14 +62,13 @@ public actor DefaultSidecarLifecycle: SidecarLifecycle {
     /// Nur gesetzt, wenn **wir** den Prozess gestartet haben.
     private var ownProcess: ProcessHandle?
 
-    public init(client: SidecarClient, runner: ProcessRunner, engineDirectory: String,
-                uvPath: String, socketPath: String, readyTimeout: Duration = .seconds(90),
+    public init(client: SidecarClient, runner: ProcessRunner, launch: EngineLaunch,
+                socketPath: String, readyTimeout: Duration = .seconds(90),
                 pollInterval: Duration = .seconds(1), terminateTimeout: Duration = .seconds(2),
                 terminatePollInterval: Duration = .milliseconds(20)) {
         self.client = client
         self.runner = runner
-        self.engineDirectory = engineDirectory
-        self.uvPath = uvPath
+        self.launch = launch
         self.socketPath = socketPath
         self.readyTimeout = readyTimeout
         self.pollInterval = pollInterval
@@ -89,21 +90,17 @@ public actor DefaultSidecarLifecycle: SidecarLifecycle {
             return .adopted
         }
 
-        // 2. Niemand da: selbst starten.
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: engineDirectory, isDirectory: &isDirectory),
-              isDirectory.boolValue else {
-            throw LifecycleError.engineDirectoryMissing(engineDirectory)
-        }
-        guard FileManager.default.isExecutableFile(atPath: uvPath) else {
-            throw LifecycleError.uvMissing(uvPath)
+        // 2. Niemand da: selbst starten. Das auszuführende Programm (mitgeliefertes `uv` im
+        // Bündel oder das Dev-`uv`) muss vorhanden und ausführbar sein.
+        guard FileManager.default.isExecutableFile(atPath: launch.executable) else {
+            throw LifecycleError.uvMissing(launch.executable)
         }
 
         ownProcess = try runner.run(
-            executable: uvPath,
-            arguments: ["run", "python", "-m", "typeless_engine.server"],
-            workingDirectory: engineDirectory,
-            environment: ["TYPELESS_SOCKET_PATH": socketPath])
+            executable: launch.executable,
+            arguments: launch.arguments,
+            workingDirectory: launch.workingDirectory,
+            environment: launch.environment)
 
         do {
             try await waitForReady()
