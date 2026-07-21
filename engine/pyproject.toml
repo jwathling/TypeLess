@@ -75,7 +75,7 @@ warn_unused_ignores = true
 disallow_untyped_defs = true
 # MLX-Pakete haben keine Typ-Stubs und sind auf Linux nicht installiert.
 [[tool.mypy.overrides]]
-module = ["mlx_whisper.*", "mlx_lm.*", "mlx.*"]
+module = ["mlx_whisper.*", "mlx_lm.*", "mlx.*", "tqdm.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
