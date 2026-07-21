@@ -134,7 +134,6 @@ func makeLifecycle(client: SidecarClient, runner: ProcessRunner,
                     socketPath: String = "/tmp/typeless-test.sock") -> DefaultSidecarLifecycle {
     DefaultSidecarLifecycle(client: client, runner: runner,
                             launch: makeLaunch(socketPath: socketPath),
-                            socketPath: socketPath,
                             readyTimeout: .milliseconds(500),
                             pollInterval: .milliseconds(10),
                             terminateTimeout: .milliseconds(200),
@@ -230,7 +229,6 @@ func makeLifecycle(client: SidecarClient, runner: ProcessRunner,
         client: ScriptedClient([.failure(.unreachable)]),
         runner: SpyProcessRunner(),
         launch: makeLaunch(executable: "/gibt/es/nicht/uv"),
-        socketPath: "/tmp/typeless-test.sock",
         readyTimeout: .milliseconds(500),
         pollInterval: .milliseconds(10))
 
@@ -257,7 +255,7 @@ func makeLifecycle(client: SidecarClient, runner: ProcessRunner,
     let runner = SpyProcessRunner()
     let client = ScriptedClient([.failure(.unreachable), .success(health("ready"))])
     let lifecycle = DefaultSidecarLifecycle(
-        client: client, runner: runner, launch: launch, socketPath: "/sock/typeless.sock",
+        client: client, runner: runner, launch: launch,
         readyTimeout: .seconds(1), pollInterval: .milliseconds(5))
 
     let ownership = try await lifecycle.start()
