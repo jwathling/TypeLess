@@ -201,9 +201,6 @@ class EngineRuntime:
         """
         if self._models_state.state == "ready":
             return  # Bereits gesichert — idempotent, kein erneuter Cache-Check nötig.
-        if models_bootstrap.models_cached(self._config):
-            self._models_state = ModelsState(state="ready")
-            return
 
         def on_progress(downloaded: int, total_bytes: int) -> None:
             # Reiner int-Schreibvorgang aus dem Worker-Thread; ``health()`` liest ihn im Loop.
@@ -212,18 +209,42 @@ class EngineRuntime:
                 state="downloading", downloaded_bytes=downloaded, total_bytes=total_bytes
             )
 
-        # Beide Netz-Aufrufe im try: ``total_download_bytes`` (HF-Metadaten) ist im „kein Netz"-
-        # Fall der ERSTE, der scheitert — läge er außerhalb, bliebe ``_models_state`` auf
-        # ``downloading`` hängen statt auf ``failed``, und die Retry-/Fehler-UX (Teil 2b) wäre
-        # für den häufigsten Erststart-Fehler kaputt.
+        # Der GESAMTE Bootstrap (Cache-Check + beide Netz-Aufrufe) im try: ``models_cached``
+        # fängt selbst nur LocalEntryNotFoundError/FileNotFoundError ab — jede andere Exception
+        # (z. B. HFValidationError bei kaputter Repo-ID) propagierte früher ungefangen und ließ
+        # ``_models_state`` auf "missing" hängen statt auf "failed" zu wechseln; ein Retry liefe
+        # dann ins Leere, ohne dass die Fehler-UX (Teil 2b) je einen Grund zu sehen bekäme.
+        # Ebenso ist ``total_download_bytes`` (HF-Metadaten) im „kein Netz"-Fall der ERSTE der
+        # beiden Netz-Aufrufe, der scheitert — läge er außerhalb, bliebe ``_models_state`` auf
+        # ``downloading`` hängen statt auf ``failed``.
+        #
+        # Solange dieser Block noch bei ``models_cached``/der Metadaten-Abfrage steht, bleibt
+        # ``_models_state.state`` auf "missing" (der Wechsel auf "downloading" passiert erst
+        # danach) — das heißt hier "noch nicht bereit, evtl. gerade dabei", NICHT "Engine idle".
         total = 0
         try:
-            total = await to_thread.run_sync(models_bootstrap.total_download_bytes, self._config)
+            if models_bootstrap.models_cached(self._config):
+                self._models_state = ModelsState(state="ready")
+                return
+            total = await to_thread.run_sync(
+                models_bootstrap.total_download_bytes, self._config, abandon_on_cancel=True
+            )
             self._models_state = ModelsState(
                 state="downloading", downloaded_bytes=0, total_bytes=total
             )
-            await to_thread.run_sync(models_bootstrap.download_models, self._config, on_progress)
-        except Exception as exc:  # noqa: BLE001 — jeder Netz-/Download-Fehler ist hier gleichwertig
+            # ``abandon_on_cancel=True``: Ohne das schöbe anyio eine Cancellation bis zum
+            # Thread-Ende auf — ein Beenden mitten im Erststart-Download würde dann minutenlang
+            # hängen, bis die vollen paar GB fertig geladen sind. huggingface_hub schreibt in
+            # ``*.incomplete``-Dateien mit atomarem Rename und resumt selbst; ein abgebrochener
+            # Download-Thread hinterlässt keinen kaputten Cache, der nächste ``ensure_ready``
+            # setzt ihn fort.
+            await to_thread.run_sync(
+                models_bootstrap.download_models,
+                self._config,
+                on_progress,
+                abandon_on_cancel=True,
+            )
+        except Exception as exc:  # noqa: BLE001 — jeder Fehler ist hier gleichwertig
             self._models_state = ModelsState(
                 state="failed", total_bytes=total, error=f"Modell-Download fehlgeschlagen: {exc}"
             )
@@ -258,6 +279,15 @@ class EngineRuntime:
             # Ohne funktionierendes STT wird nie transkribiert — dann muss auch kein LLM
             # (~2 GB) in einen Prozess geladen werden, der ohnehin nichts verarbeiten kann.
             _log.warning("Preload übersprungen: Sidecar ist nicht einsatzbereit.")
+            return
+        if self._models_state.state != "ready":
+            # Vor abgeschlossenem Modell-Bootstrap kein spekulatives LLM-Laden — das lüde den
+            # LLM-Repo parallel zum Erststart-Download (~2 GB RAM) und untergrübe den zentralen
+            # Fortschritts-Report (models-Block in /health).
+            _log.warning(
+                "Preload übersprungen: Modelle noch nicht bereit (%s).",
+                self._models_state.state,
+            )
             return
         async with self._lock:
             await self._preload_unlocked()
