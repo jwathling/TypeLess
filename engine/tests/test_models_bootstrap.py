@@ -31,3 +31,26 @@ def test_download_models_meldet_fortschritt_und_schliesst_mit_total(monkeypatch)
     assert [d for d, _ in calls] == sorted(d for d, _ in calls)
     assert all(t == 1000 for _, t in calls)
     assert calls[-1] == (1000, 1000)
+
+
+def test_download_models_clampt_ueberschuss_durch_xet_doppelzaehlung(monkeypatch):
+    """Xet-beschleunigtes huggingface_hub meldet pro Datei zwei tqdm-Phasen (Downloading +
+    Reconstructing), die beide update() rufen — der rohe Akkumulator überschießt real bis
+    ~172 % von total. Der an on_progress gemeldete Wert muss trotzdem nie über total steigen."""
+    cfg = EngineConfig(stt_model="stt/repo", llm_model="llm/repo")
+    monkeypatch.setattr(mb, "total_download_bytes", lambda config: 1000)
+
+    def fake_snapshot(repo_id, *, tqdm_class, **kwargs):
+        bar = tqdm_class(total=1000, unit="B")
+        # Zwei Phasen melden je 800 Bytes — roh 1600, doppelt so viel wie total.
+        bar.update(800)
+        bar.update(800)
+        bar.close()
+
+    monkeypatch.setattr(mb, "snapshot_download", fake_snapshot)
+
+    calls: list[tuple[int, int]] = []
+    mb.download_models(cfg, lambda d, t: calls.append((d, t)))
+
+    assert all(d <= 1000 for d, _ in calls)
+    assert calls[-1] == (1000, 1000)
