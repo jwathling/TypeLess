@@ -36,7 +36,13 @@ struct TypeLessApp: App {
 
         let lifecycle = DefaultSidecarLifecycle(
             client: client, runner: FoundationProcessRunner(),
-            launch: launch, socketPath: settings.socketPath)
+            launch: launch,
+            // Erster gebündelter Kaltstart baut die ~1,3-GB-Python-Umgebung auf (uv sync) und lädt
+            // danach das STT-Modell — das dauert je nach Netz mehrere Minuten. Der Default von 90 s
+            // würde diesen Aufbau abbrechen. Das SICHTBARE Erststart-Erlebnis (Fortschritt, sauberer
+            // Abbruch bei fehlendem Netz) kommt in Teil 2; hier zählt nur, dass der Aufbau nicht
+            // fälschlich abgewürgt wird.
+            readyTimeout: isBundled ? .seconds(900) : .seconds(90))
 
         let state = AppState(lifecycle: lifecycle, client: client,
                              permissions: SystemPermissionsService())

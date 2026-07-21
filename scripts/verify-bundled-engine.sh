@@ -19,7 +19,7 @@ env -i HOME="$HOME" PATH="/usr/bin:/bin" \
     "$ENGINE/uv" run --frozen --project "$ENGINE" --extra mlx --extra server \
     python -m typeless_engine.server &
 PID=$!
-trap 'kill $PID 2>/dev/null || true; rm -rf "$WORK"' EXIT
+trap 'kill $PID 2>/dev/null || true; pkill -f "$WORK/runtime" 2>/dev/null || true; rm -rf "$WORK"' EXIT
 
 echo "== auf /health = ready warten (bis 600 s; erster Lauf lädt Umgebung + STT-Modell) =="
 for i in $(seq 1 600); do

@@ -45,11 +45,6 @@ public actor DefaultSidecarLifecycle: SidecarLifecycle {
     /// — von außen gereicht (s. `EngineLaunch.resolve`, Composition-Root), damit dieser Typ weder
     /// weiß noch entscheiden muss, ob die Engine gebündelt oder aus dem Entwicklungs-Repo startet.
     private let launch: EngineLaunch
-    /// Der Socket-Pfad, auf dem der gespawnte Sidecar lauschen soll — wird dem Kindprozess als
-    /// `TYPELESS_SOCKET_PATH` mitgegeben (s. `engine/typeless_engine/config.py`). Der Lifecycle
-    /// muss ihn kennen, damit derselbe Pfad, auf den `client` verbindet, auch tatsächlich beim
-    /// Spawn ankommt (Finding I2, Review).
-    private let socketPath: String
     private let readyTimeout: Duration
     private let pollInterval: Duration
     /// Obergrenze, wie lange ``stop()`` nach dem SIGTERM auf das tatsächliche Prozessende
@@ -63,13 +58,12 @@ public actor DefaultSidecarLifecycle: SidecarLifecycle {
     private var ownProcess: ProcessHandle?
 
     public init(client: SidecarClient, runner: ProcessRunner, launch: EngineLaunch,
-                socketPath: String, readyTimeout: Duration = .seconds(90),
+                readyTimeout: Duration = .seconds(90),
                 pollInterval: Duration = .seconds(1), terminateTimeout: Duration = .seconds(2),
                 terminatePollInterval: Duration = .milliseconds(20)) {
         self.client = client
         self.runner = runner
         self.launch = launch
-        self.socketPath = socketPath
         self.readyTimeout = readyTimeout
         self.pollInterval = pollInterval
         self.terminateTimeout = terminateTimeout
