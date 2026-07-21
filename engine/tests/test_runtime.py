@@ -12,6 +12,7 @@ from collections.abc import Callable
 import numpy as np
 import pytest
 
+import typeless_engine.server.runtime as rt
 from typeless_engine.config import EngineConfig
 from typeless_engine.dictionary import DictionaryEngine
 from typeless_engine.interfaces import Refiner, Transcriber
@@ -606,3 +607,105 @@ async def test_idle_unload_does_not_race_with_concurrent_process() -> None:
     assert unloaded is False
     assert llm.unloads == 0
     assert runtime.health().llm_loaded is True
+
+
+# ---- ensure_ready(): Modell-Sicherung vor dem STT-Warm-up -----------------------------------
+#
+# Diese Tests steuern ``models_bootstrap`` per monkeypatch (statt der globalen
+# ``_modelle_gelten_als_bereits_gecacht``-Fixture in ``conftest.py``, die den Rest der Suite vor
+# einem echten Mehr-Gigabyte-Download schützt) und prüfen die eigentliche Sequenz.
+
+
+@pytest.mark.anyio
+async def test_ensure_ready_bei_vorhandenem_cache_setzt_ready_und_waermt_stt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(rt.models_bootstrap, "models_cached", lambda config: True)
+    stt = SpyTranscriber()
+    runtime = make_runtime(transcriber=stt)
+
+    await runtime.ensure_ready()
+
+    h = runtime.health()
+    assert h.models.state == "ready"
+    assert h.status == "ready"
+    assert stt.warm_ups == 1  # STT wurde warm
+
+
+@pytest.mark.anyio
+async def test_ensure_ready_bei_download_fehler_meldet_failed_und_ueberspringt_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(rt.models_bootstrap, "models_cached", lambda config: False)
+    monkeypatch.setattr(rt.models_bootstrap, "total_download_bytes", lambda config: 1000)
+
+    def boom(config: EngineConfig, on_progress: object) -> None:
+        raise RuntimeError("kein Netz")
+
+    monkeypatch.setattr(rt.models_bootstrap, "download_models", boom)
+    stt = SpyTranscriber()
+    runtime = make_runtime(transcriber=stt)
+
+    await runtime.ensure_ready()
+
+    h = runtime.health()
+    assert h.models.state == "failed"
+    assert "kein Netz" in (h.models.error or "")
+    assert stt.warm_ups == 0  # STT NICHT auf halben Modellen gestartet
+    assert h.status != "ready"
+
+
+@pytest.mark.anyio
+async def test_ensure_ready_bei_metadaten_fehler_meldet_failed_und_ueberspringt_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``total_download_bytes`` (HF-Metadaten, Netz) ist im „kein Netz"-Fall der ERSTE, der
+    scheitert — noch vor ``download_models``. Auch dieser Fehler muss zu ``failed`` führen,
+    nicht ``_models_state`` auf ``downloading`` hängen lassen (sonst wäre die Retry-UX kaputt).
+    """
+    monkeypatch.setattr(rt.models_bootstrap, "models_cached", lambda config: False)
+
+    def boom(config: EngineConfig) -> int:
+        raise RuntimeError("kein Netz")
+
+    monkeypatch.setattr(rt.models_bootstrap, "total_download_bytes", boom)
+    stt = SpyTranscriber()
+    runtime = make_runtime(transcriber=stt)
+
+    await runtime.ensure_ready()
+
+    h = runtime.health()
+    assert h.models.state == "failed"
+    assert "kein Netz" in (h.models.error or "")
+    assert stt.warm_ups == 0  # STT NICHT auf halben Modellen gestartet
+    assert h.status != "ready"
+
+
+@pytest.mark.anyio
+async def test_ensure_ready_ist_nach_fehler_wiederholbar(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"n": 0}
+
+    def cached(config: EngineConfig) -> bool:
+        return calls["n"] > 0  # erster Lauf: fehlt; nach Retry: da
+
+    monkeypatch.setattr(rt.models_bootstrap, "models_cached", cached)
+    monkeypatch.setattr(rt.models_bootstrap, "total_download_bytes", lambda config: 10)
+
+    def flaky(config: EngineConfig, on_progress: object) -> None:
+        calls["n"] += 1
+        raise RuntimeError("kein Netz")  # erster Download scheitert
+
+    monkeypatch.setattr(rt.models_bootstrap, "download_models", flaky)
+    stt = SpyTranscriber()
+    runtime = make_runtime(transcriber=stt)
+
+    await runtime.ensure_ready()
+    assert runtime.health().models.state == "failed"
+
+    # Retry: jetzt ist der Cache "da" (cached() liefert True) -> ready + STT warm
+    await runtime.ensure_ready()
+
+    h = runtime.health()
+    assert h.models.state == "ready"
+    assert h.status == "ready"
+    assert stt.warm_ups == 1

@@ -26,8 +26,19 @@ from ..interfaces import Refiner, Transcriber
 from ..logging_ import get_logger
 from ..models import AudioBuffer, Mode, ProcessResult
 from ..pipeline import PipelineConfig, process
+from . import models_bootstrap
 
 _log = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class ModelsState:
+    """Zustand des Modell-Bootstraps (Teil des ``/health``-Reports)."""
+
+    state: str  # "missing" | "downloading" | "ready" | "failed"
+    downloaded_bytes: int = 0
+    total_bytes: int = 0
+    error: str | None = None  # Grund, falls ``state == "failed"``; sonst None
 
 
 @dataclass(frozen=True)
@@ -41,6 +52,7 @@ class HealthState:
     stt_model: str
     llm_model: str
     error: str | None = None  # Grund, falls ``status == "failed"``; sonst None
+    models: ModelsState = ModelsState(state="missing")
 
 
 class StartupFailedError(RuntimeError):
@@ -119,6 +131,10 @@ class EngineRuntime:
         self._ready = asyncio.Event()
         self._startup_error: str | None = None
         self._llm_loaded = False
+        self._models_state = ModelsState(state="missing")
+        # Serialisiert ``ensure_ready()``: Der Lifespan-Startlauf und ein paralleles
+        # ``POST /models/ensure`` (Retry) dürfen sich nicht überlappen.
+        self._ensure_lock = asyncio.Lock()
         # Nur "es wird gerade ein Diktat verarbeitet" — bewusst nicht ``self._lock.locked()``:
         # Den Lock hält auch ein reines ``/preload``, und die Swift-Shell (M3) hängt ihr Overlay
         # an ``busy``; es darf beim bloßen Hotkey-Druck nicht aufblitzen.
@@ -154,11 +170,68 @@ class EngineRuntime:
             stt_model=self._config.stt_model,
             llm_model=self._config.llm_model,
             error=self._startup_error,
+            models=self._models_state,
         )
 
     # ---- Lebenszyklus -------------------------------------------------------
 
     async def startup(self) -> None:
+        """Vom Lifespan gerufen: Modelle sichern (mit Fortschritt), dann STT warm laden."""
+        await self.ensure_ready()
+
+    async def ensure_ready(self) -> None:
+        """Idempotent + retry-fähig: erst die Modelle in den Cache, dann das STT-Warm-up.
+
+        Serialisiert über ``_ensure_lock`` — der Lifespan-Startlauf und ein paralleles
+        ``POST /models/ensure`` (Retry) dürfen sich nicht überlappen. Nach einem
+        fehlgeschlagenen Download bleibt ``models.state == "failed"``; ein erneuter Aufruf
+        (Retry ohne Sidecar-Neustart) versucht es wieder.
+        """
+        async with self._ensure_lock:
+            await self._ensure_models_unlocked()
+            if self._models_state.state == "ready" and not self._ready.is_set():
+                await self._warm_up_stt()
+
+    async def _ensure_models_unlocked(self) -> None:
+        """Sichert die Modell-Dateien im Cache (Download bei Bedarf, mit Fortschritt).
+
+        Muss aus ``ensure_ready()`` unter ``_ensure_lock`` aufgerufen werden — ruft selbst
+        keinen Lock, damit die Sequenz (Modelle sichern, dann STT warm) als Ganzes serialisiert
+        bleibt.
+        """
+        if self._models_state.state == "ready":
+            return  # Bereits gesichert — idempotent, kein erneuter Cache-Check nötig.
+        if models_bootstrap.models_cached(self._config):
+            self._models_state = ModelsState(state="ready")
+            return
+
+        def on_progress(downloaded: int, total_bytes: int) -> None:
+            # Reiner int-Schreibvorgang aus dem Worker-Thread; ``health()`` liest ihn im Loop.
+            # Ein frozen-Replace ist atomar genug für einen Fortschrittswert (kein Lock nötig).
+            self._models_state = ModelsState(
+                state="downloading", downloaded_bytes=downloaded, total_bytes=total_bytes
+            )
+
+        # Beide Netz-Aufrufe im try: ``total_download_bytes`` (HF-Metadaten) ist im „kein Netz"-
+        # Fall der ERSTE, der scheitert — läge er außerhalb, bliebe ``_models_state`` auf
+        # ``downloading`` hängen statt auf ``failed``, und die Retry-/Fehler-UX (Teil 2b) wäre
+        # für den häufigsten Erststart-Fehler kaputt.
+        total = 0
+        try:
+            total = await to_thread.run_sync(models_bootstrap.total_download_bytes, self._config)
+            self._models_state = ModelsState(
+                state="downloading", downloaded_bytes=0, total_bytes=total
+            )
+            await to_thread.run_sync(models_bootstrap.download_models, self._config, on_progress)
+        except Exception as exc:  # noqa: BLE001 — jeder Netz-/Download-Fehler ist hier gleichwertig
+            self._models_state = ModelsState(
+                state="failed", total_bytes=total, error=f"Modell-Download fehlgeschlagen: {exc}"
+            )
+            _log.warning("Modell-Download fehlgeschlagen: %s", exc)
+            return
+        self._models_state = ModelsState(state="ready", downloaded_bytes=total, total_bytes=total)
+
+    async def _warm_up_stt(self) -> None:
         """Lädt das STT warm. Bis dahin meldet ``/health`` ``starting``.
 
         Scheitert das Laden (kaputter Modell-Cache, falsche Modell-ID, kein Netz beim ersten
