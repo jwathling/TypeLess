@@ -101,6 +101,28 @@ async def client_for(runtime: EngineRuntime) -> AsyncClient:
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://sidecar")
 
 
+class CountingEnsureReadyRuntime(EngineRuntime):
+    """Wie ``EngineRuntime``, zählt aber die ``ensure_ready``-Aufrufe.
+
+    Kein eigener Fake-Zustand nötig: ``HealthState.models``/``ModelsState`` liefert bereits
+    die echte ``EngineRuntime`` (Task 2). Nur der Zähler kommt hinzu — analog zu
+    ``SpyRefiner.preloads``/``unloads``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            EngineConfig(stt_backend="mock", llm_backend="mock"),
+            transcriber=SpyTranscriber(),
+            refiner=SpyRefiner(),
+            dictionary=DictionaryEngine({}),
+        )
+        self.ensure_ready_calls = 0
+
+    async def ensure_ready(self) -> None:
+        self.ensure_ready_calls += 1
+        await super().ensure_ready()
+
+
 @pytest.mark.anyio
 async def test_health_reports_starting_then_ready() -> None:
     runtime = build()
@@ -388,3 +410,31 @@ async def test_pcm_body_reaches_the_transcriber_unverfaelscht() -> None:
     assert buffer.sample_rate == TARGET_SAMPLE_RATE
     assert len(buffer.samples) == len(sent)  # nichts abgeschnitten, nichts angehängt
     np.testing.assert_array_equal(buffer.samples, sent.astype(np.float32))
+
+
+# ---- Modell-Bootstrap über HTTP: models-Block in /health + POST /models/ensure -------------
+
+
+@pytest.mark.anyio
+async def test_health_enthaelt_models_block() -> None:
+    runtime = build()
+    await runtime.startup()
+    async with await client_for(runtime) as client:
+        response = await client.get("/health")
+
+    body = response.json()
+    assert "models" in body
+    assert set(body["models"]) == {"state", "downloaded_bytes", "total_bytes", "error"}
+
+
+@pytest.mark.anyio
+async def test_models_ensure_startet_sequenz_und_antwortet_202() -> None:
+    """``/models/ensure`` ist fire-and-forget: 202 sofort, ``ensure_ready`` läuft im Hintergrund."""
+    runtime = CountingEnsureReadyRuntime()
+    async with await client_for(runtime) as client:
+        response = await client.post("/models/ensure")
+        assert response.status_code == 202
+
+        await wait_for(lambda: runtime.ensure_ready_calls >= 1)
+
+    assert runtime.ensure_ready_calls >= 1

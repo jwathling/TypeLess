@@ -29,6 +29,13 @@ _log = get_logger(__name__)
 _BYTES_PER_SAMPLE = 4
 
 
+class ModelsResponse(BaseModel):
+    state: str  # "missing" | "downloading" | "ready" | "failed"
+    downloaded_bytes: int
+    total_bytes: int
+    error: str | None = None  # Grund, falls ``state == "failed"``
+
+
 class HealthResponse(BaseModel):
     status: str  # "starting" | "ready" | "failed"
     stt_loaded: bool
@@ -37,6 +44,7 @@ class HealthResponse(BaseModel):
     stt_model: str
     llm_model: str
     error: str | None = None  # Grund, falls ``status == "failed"``
+    models: ModelsResponse
 
 
 class ProcessResponse(BaseModel):
@@ -84,6 +92,12 @@ def create_app(
             stt_model=state.stt_model,
             llm_model=state.llm_model,
             error=state.error,
+            models=ModelsResponse(
+                state=state.models.state,
+                downloaded_bytes=state.models.downloaded_bytes,
+                total_bytes=state.models.total_bytes,
+                error=state.models.error,
+            ),
         )
 
     @app.post("/preload", status_code=202)
@@ -91,6 +105,17 @@ def create_app(
         """Spekulativer Vorlauf beim Hotkey-Druck: startet das Laden und kehrt sofort zurück."""
         task = asyncio.create_task(runtime.preload())
         preload_tasks.add(task)
+        task.add_done_callback(preload_tasks.discard)
+        return Response(status_code=202)
+
+    @app.post("/models/ensure", status_code=202)
+    async def ensure_models() -> Response:
+        """Stößt Modell-Sicherung + STT-Warm-up an (auch als „Erneut versuchen" nach Netzfehler).
+
+        Kehrt sofort mit 202 zurück; der Fortschritt läuft über ``/health`` (``models``-Block).
+        """
+        task = asyncio.create_task(runtime.ensure_ready())
+        preload_tasks.add(task)  # hält den Task am Leben, räumt ihn im Lifespan ab (s. /preload)
         task.add_done_callback(preload_tasks.discard)
         return Response(status_code=202)
 
