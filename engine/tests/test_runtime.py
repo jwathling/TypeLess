@@ -211,6 +211,26 @@ async def test_failed_warm_up_skips_preload() -> None:
 
 
 @pytest.mark.anyio
+async def test_preload_skips_before_models_are_ready() -> None:
+    """Guard gegen den parallelen Erststart-Download (Review-Fix): Vor abgeschlossenem
+    Modell-Bootstrap bleibt ``_models_state.state`` auf "missing" (bzw. "downloading") — ein
+    Hotkey-Druck darf in diesem Fenster nicht zusätzlich den LLM-Repo parallel herunterladen
+    und ~2 GB in den knappen Erststart-RAM ziehen. Bewusst OHNE vorheriges ``startup()``/
+    ``ensure_ready()`` — genau der Zustand, den ein Hotkey-Druck während des allerersten
+    Downloads tatsächlich vorfindet.
+    """
+    llm = SpyRefiner()
+    runtime = make_runtime(refiner=llm)
+
+    assert runtime.health().models.state == "missing"
+
+    await runtime.preload()
+
+    assert llm.preloads == 0
+    assert runtime.health().llm_loaded is False
+
+
+@pytest.mark.anyio
 async def test_preload_is_idempotent() -> None:
     llm = SpyRefiner()
     runtime = make_runtime(refiner=llm)
