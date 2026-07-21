@@ -77,7 +77,11 @@ def download_models(config: EngineConfig, on_progress: Callable[[int, int], None
         def update(self, n: float | None = 1) -> None:
             nonlocal downloaded
             downloaded += int(n or 0)
-            on_progress(downloaded, total)
+            # Xet-beschleunigtes huggingface_hub instanziiert pro Datei mehrere tqdm-Phasen
+            # ("Downloading bytes" + "Reconstructing"), die BEIDE update() melden — der rohe
+            # Akkumulator überschießt dadurch real bis ~172 % von total. Nach außen wird daher
+            # bei total geclampt; roh weiterzählen bleibt nötig für super().update(n).
+            on_progress(min(downloaded, total), total)
             super().update(n)
 
     for repo in required_model_ids(config):
