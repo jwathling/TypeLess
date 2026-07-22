@@ -1,11 +1,13 @@
 import Foundation
 
-/// Spricht mit dem Sidecar. Vier Methoden, exakt die vier Endpunkte aus M2.
+/// Spricht mit dem Sidecar. Fünf Methoden: die vier Endpunkte aus M2 plus `ensureModels`
+/// (M8-Verteilung Teil 2b) — stößt den Modell-Bootstrap der Engine an ("Erneut versuchen").
 public protocol SidecarClient: Sendable {
     func health() async throws -> HealthState
     func preload() async throws
     func process(pcm: Data, mode: Mode, language: String?) async throws -> ProcessResult
     func unload() async throws
+    func ensureModels() async throws
 }
 
 /// Die echte Implementierung: HTTP über den Unix-Domain-Socket.
@@ -53,6 +55,11 @@ public struct HTTPSidecarClient: SidecarClient {
 
     public func unload() async throws {
         _ = try await request("POST", "/unload", body: nil, contentType: nil, timeout: unloadTimeout)
+    }
+
+    public func ensureModels() async throws {
+        _ = try await request("POST", "/models/ensure", body: nil, contentType: nil,
+                              timeout: preloadTimeout)
     }
 
     public func process(pcm: Data, mode: Mode, language: String?) async throws -> ProcessResult {

@@ -136,6 +136,19 @@ private let gesundJSON = """
     try await client.unload()
 }
 
+// Teil 2b (M8-Verteilung): ensureModels() stößt den Modell-Bootstrap der Engine an.
+@Test func ensureModelsRuftPostModelsEnsure() async throws {
+    let server = try FakeSidecarServer()
+    defer { server.stop() }
+    server.respond(status: 202, json: "{}")
+
+    let client = HTTPSidecarClient(socketPath: server.socketPath)
+    try await client.ensureModels()
+
+    let request = try #require(server.receivedRequests.first)
+    #expect(request.contains("POST /models/ensure"))
+}
+
 // Finding 1 (Review, Task 3): Ein Timeout heißt "Verbindung stand, nur keine Antwort" — ein
 // anderer Zustand als `unreachable` ("lauscht niemand"). Der Sidecar verarbeitet laut M2
 // serialisiert, ein Timeout ist also ein realer, unterscheidbarer Zustand. Harte Obergrenze über
