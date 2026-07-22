@@ -18,8 +18,10 @@ public enum EngineState: Sendable, Equatable {
 public final class AppState {
     public private(set) var engine: EngineState = .stopped
     public private(set) var permissions: PermissionStatus
-    /// UI-Zustand des Einrichtungs-Fensters (M8-Verteilung Teil 2b) — abgeleitet aus demselben
-    /// `health()`-Ergebnis, aus dem auch ``engine`` gesetzt wird (s. ``pollOnce()``).
+    /// UI-Zustand des Einrichtungs-Fensters (M8-Verteilung Teil 2b) — abgeleitet über eine
+    /// eigene Poll-Achse (``startSetupPolling()``), NICHT mehr über den Engine-Poll (s. dort für
+    /// die Begründung: der Engine-Poll läuft erst nach einem erfolgreichen ``lifecycle.start()``,
+    /// das aber genau die Download-Phase blockiert, die dieses Fenster zeigen soll).
     public private(set) var setup: SetupState = .hidden
 
     private let lifecycle: SidecarLifecycle
@@ -28,22 +30,26 @@ public final class AppState {
     private let pollIntervalStarting: Duration
     private let pollIntervalReady: Duration
     private let permissionsInterval: Duration
+    private let setupInterval: Duration
 
     private var pollTask: Task<Void, Never>?
     private var permissionsTask: Task<Void, Never>?
+    private var setupTask: Task<Void, Never>?
 
     public init(lifecycle: SidecarLifecycle,
                 client: SidecarClient,
                 permissions: PermissionsService,
                 pollIntervalStarting: Duration = .seconds(1),
                 pollIntervalReady: Duration = .seconds(5),
-                permissionsInterval: Duration = .seconds(2)) {
+                permissionsInterval: Duration = .seconds(2),
+                setupInterval: Duration = .seconds(1)) {
         self.lifecycle = lifecycle
         self.client = client
         permissionsService = permissions
         self.pollIntervalStarting = pollIntervalStarting
         self.pollIntervalReady = pollIntervalReady
         self.permissionsInterval = permissionsInterval
+        self.setupInterval = setupInterval
         self.permissions = permissions.status()
     }
 
@@ -75,6 +81,11 @@ public final class AppState {
         // Reihenfolge nichts zu tun und darf sie deshalb auch nicht anfassen.
         startPermissionsPolling()
 
+        // Task 5 (Handprobe-Befund zu M8-Verteilung Teil 2b): analog zur Rechte-Achse eine
+        // EIGENE Poll-Achse für den Erststart-Fortschritt, ebenfalls VOR `lifecycle.start()`
+        // gestartet — s. ausführliche Begründung bei ``startSetupPolling()``.
+        startSetupPolling()
+
         engine = .starting
         do {
             _ = try await lifecycle.start()
@@ -96,6 +107,7 @@ public final class AppState {
     public func shutdown() async {
         await stopPolling()
         await stopPermissionsPolling()
+        await stopSetupPolling()
         await lifecycle.stop()
         engine = .stopped
     }
@@ -182,6 +194,55 @@ public final class AppState {
         permissionsTask = nil
     }
 
+    // MARK: - Erststart-Fortschritt (Task 5, Fix zu M8-Verteilung Teil 2b)
+
+    /// Eigene Achse für den Erststart-Fortschritt — läuft **unabhängig** vom Engine-Poll und schon
+    /// **während** ``lifecycle.start()`` (das die gesamte Download-Phase in ``waitForReady()``
+    /// blockiert). Nur so kann das Einrichtungs-Fenster während des Modell-Downloads erscheinen.
+    ///
+    /// Eine **Handprobe** hat aufgedeckt, dass das Fenster im realen Ablauf nie erscheinen konnte:
+    /// `setup` wurde bis hierher nur im Engine-Poll gesetzt, und der startet erst NACH einem
+    /// erfolgreichen `lifecycle.start()` — genau der Aufruf, der bei `DefaultSidecarLifecycle` die
+    /// gesamte Download-Phase blockiert (`waitForReady()` wertet nur `status`, nicht `models`,
+    /// aus). Kam `lifecycle.start()` zurück, war der Download längst fertig und `models.state`
+    /// bereits `"ready"` → `.hidden`. Strukturell konnte das Fenster nie sichtbar werden.
+    ///
+    /// Setzt ausschließlich ``setup`` (ein Schreiber — der Engine-Poll fasst `setup` seither nicht
+    /// mehr an, s. ``pollOnce()``); ein fehlgeschlagenes ``health()`` (Engine kommt gerade erst
+    /// hoch, der Socket existiert noch nicht) lässt ``setup`` unangetastet (bleibt ``.hidden`` →
+    /// kein Fenster), analog zur toleranten Rechte-Achse.
+    ///
+    /// **Erst schlafen, dann fragen** (anders als die Rechte-Achse, die sofort liest): Direkt nach
+    /// dem Start existiert der Sidecar-Socket in der Regel noch gar nicht — ein sofortiger
+    /// `health()` liefe nur ins Leere. Der kleine Anfangsversatz (``setupInterval``, in der
+    /// Produktion 1 s) ist unkritisch, der Download dauert Sekunden. Die Reihenfolge hat zudem eine
+    /// harte Test-Konsequenz: Nach einem `cancel()` (aus ``stopSetupPolling()``) darf die Achse
+    /// **keinen weiteren** `health()`-Aufruf mehr absetzen — sonst bliebe sie an einem
+    /// test-seitig gegateten `health()` hängen und ``stopSetupPolling()`` (das auf `value` wartet)
+    /// verklemmte. Deshalb nach dem Schlaf **vor** dem Aufruf noch einmal auf Abbruch prüfen.
+    private func startSetupPolling() {
+        setupTask?.cancel()
+        setupTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                try? await Task.sleep(for: self.setupInterval)
+                if Task.isCancelled { return }
+                if let health = try? await self.client.health() {
+                    self.setup = SetupState(models: health.models)
+                }
+            }
+        }
+    }
+
+    /// Beim **Beenden** wird auf das Ende der Task gewartet — dieselbe Sorgfalt wie bei
+    /// ``stopPermissionsPolling()`` (s. dort für die Begründung, warum das bei ``stopPolling()``
+    /// sogar noch strenger sein muss, hier aber wie bei der Rechte-Achse ungefährlich ist).
+    private func stopSetupPolling() async {
+        setupTask?.cancel()
+        await setupTask?.value
+        setupTask = nil
+    }
+
     // MARK: - Polling
 
     /// Fragt den Sidecar regelmäßig, wie es ihm geht — damit ein Wegsterben auffällt.
@@ -213,11 +274,11 @@ public final class AppState {
     /// Kümmert sich **ausschließlich** um die Engine. Die Rechte-Auffrischung lief bis M5 hier
     /// mit (Finding I1, Review M3) — sie ist seit M2 (Abschluss-Review M5) auf eine eigene Task
     /// gezogen, weil diese hier nur nach einem ERFOLGREICHEN Engine-Start läuft; s.
-    /// ``startPermissionsPolling()``.
+    /// ``startPermissionsPolling()``. Aus demselben Grund (Task 5) setzt dieser Poll seit der
+    /// eigenen setup-Achse auch ``setup`` nicht mehr — s. ``startSetupPolling()``.
     private func pollOnce() async -> Duration {
         do {
             let health = try await client.health()
-            setup = SetupState(models: health.models)
             switch health.status {
             case "ready":
                 engine = .ready
