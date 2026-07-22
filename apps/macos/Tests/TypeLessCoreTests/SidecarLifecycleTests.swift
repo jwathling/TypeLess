@@ -108,6 +108,7 @@ final class ScriptedClient: SidecarClient, @unchecked Sendable {
 
     func preload() async throws {}
     func unload() async throws {}
+    func ensureModels() async throws {}
     func process(pcm: Data, mode: Mode, language: String?) async throws -> ProcessResult {
         fatalError("in diesen Tests nicht benutzt")
     }

@@ -56,6 +56,7 @@ final class DictationClient: SidecarClient, @unchecked Sendable {
     }
 
     func unload() async throws {}
+    func ensureModels() async throws {}
 
     func process(pcm: Data, mode: Mode, language: String?) async throws -> ProcessResult {
         vermerkeProcess()
@@ -175,6 +176,7 @@ final class GatedDictationClient: SidecarClient, @unchecked Sendable {
 
     func preload() async throws {}
     func unload() async throws {}
+    func ensureModels() async throws {}
 
     func process(pcm: Data, mode: Mode, language: String?) async throws -> ProcessResult {
         vermerkeProcess()
