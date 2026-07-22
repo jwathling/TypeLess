@@ -262,6 +262,58 @@ final class SignalingHealthClient: SidecarClient, @unchecked Sendable {
     }
 }
 
+/// Für Task 6: unterscheidet den ERSTEN `health()`-Aufruf (steht für die ALTE, überholte
+/// setup-Task) von jedem weiteren (die NEUE Task, die nach einem erneuten Start entsteht). Der
+/// erste Aufruf hängt hinter einem ``AsyncGate`` und liefert nach der Freigabe einen VERALTETEN
+/// Wert; jeder weitere kehrt sofort mit einem FRISCHEN Wert zurück. Damit lässt sich genau das
+/// Race provozieren, gegen das das Generations-Token in `AppState.startSetupPolling()` schützt:
+/// Löst der hängende alte Aufruf ERST NACH dem frischen Schreiben der neuen Task auf, darf er
+/// `setup` nicht mehr zurücksetzen.
+final class StaleFirstCallHealthClient: SidecarClient, @unchecked Sendable {
+    private let lock = NSLock()
+    private var callCount = 0
+    private let gate: AsyncGate
+    private let staleResult: Result<HealthState, SidecarError>
+    private let freshResult: Result<HealthState, SidecarError>
+
+    /// Feuert, sobald der ERSTE Aufruf eingetroffen ist und zu hängen begonnen hat — der Test
+    /// kann daran deterministisch abwarten, dass die ALTE Task ihren `health()`-Aufruf bereits
+    /// abgesetzt hat, bevor er die NEUE Task startet (kein festes `sleep` nötig).
+    let firstCallStarted: AsyncStream<Void>
+    private let firstCallStartedContinuation: AsyncStream<Void>.Continuation
+
+    init(gate: AsyncGate, stale: Result<HealthState, SidecarError>,
+        fresh: Result<HealthState, SidecarError>) {
+        self.gate = gate
+        staleResult = stale
+        freshResult = fresh
+        (firstCallStarted, firstCallStartedContinuation) = AsyncStream<Void>.makeStream()
+    }
+
+    /// Synchron aus demselben Grund wie ``StaticClient/currentState()``.
+    private func nextCallNumber() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        callCount += 1
+        return callCount
+    }
+
+    func health() async throws -> HealthState {
+        if nextCallNumber() == 1 {
+            firstCallStartedContinuation.yield()
+            await gate.wait()
+            return try staleResult.get()
+        }
+        return try freshResult.get()
+    }
+
+    func preload() async throws {}
+    func unload() async throws {}
+    func ensureModels() async throws {}
+    func process(pcm: Data, mode: Mode, language: String?) async throws -> ProcessResult {
+        fatalError("in diesen Tests nicht benutzt")
+    }
+}
+
 struct FakePermissions: PermissionsService {
     let granted: Bool
     func status() -> PermissionStatus {
@@ -600,8 +652,11 @@ func setupWirdWaehrendBlockierendemStartSichtbar() async {
 // `warteBisMitEchterZeit`, exakt wie die beiden Rechte-Achsen-Tests oben: ein gemeinsames Gate
 // würde die Achsen künstlich koppeln, was der Fix gerade entkoppelt hat. `warteBisMitEchterZeit`
 // kehrt zurück, sobald die Bedingung gilt (im GRÜN-Fall Millisekunden) — keine feste Wartezeit.
-// `FakeLifecycle` kehrt sofort zurück, also läuft hier auch der Engine-Poll — der `setup` seit dem
-// Fix nicht mehr anfasst; dieser Test ist zugleich die Wache dafür.
+// `FakeLifecycle` kehrt sofort zurück, also läuft hier auch der Engine-Poll mit — belegt (neben
+// dem eigentlichen Befund) nur, dass `setup` trotzdem über die setup-Achse ankommt, NICHT, dass
+// `pollOnce()` `setup` unangetastet lässt (das prüft dieser Test nicht: ein wieder eingeführter
+// zweiter Schreiber in `pollOnce()` schriebe hier denselben Wert aus derselben
+// `health()`-Momentaufnahme, der Test bliebe grün).
 @MainActor
 @Test(.timeLimit(.minutes(1)))
 func setupAchseSpiegeltDenModelsBlock() async {
@@ -622,6 +677,70 @@ func setupAchseSpiegeltDenModelsBlock() async {
     #expect(state.setup == .downloading(fraction: 0.5, downloadedBytes: 1950, totalBytes: 3900),
             "die setup-Achse übernimmt den models-Block unabhängig vom Engine-Poll")
 
+    await state.shutdown()
+}
+
+// Task 6 (Fix nach Review Task 5): `startSetupPolling()` bricht die alte Task per `cancel()` ab,
+// OHNE auf ihr Ende zu warten — kopiert das Muster von `startPermissionsPolling()`. Für die
+// Rechte-Achse ist das sicher (sie liest synchron), für die setup-Achse gefährlich: Sie schreibt
+// `setup` erst NACH einem `await client.health()`. Hängt der `health()`-Aufruf der ALTEN Task
+// noch, während eine NEUE Task (z. B. nach `restart()`, dem „Engine neu starten"-Button) bereits
+// gestartet und geschrieben hat, kann die alte Task ihren VERALTETEN Wert danach zurückschreiben.
+//
+// Deterministisch über `StaleFirstCallHealthClient`: dessen ERSTER `health()`-Aufruf (die alte
+// Task) hängt hinter einem `AsyncGate`, jeder weitere (die neue Task) liefert sofort. Ein zweiter
+// `state.start()` — analog zu `doppelterStartUeberlagertKeinePollTasks()` — cancelt die alte
+// setup-Task, ohne auf sie zu warten, und erzeugt die neue. `BlockingLifecycle` hält
+// `lifecycle.start()` in BEIDEN start()-Aufrufen offen, damit der Engine-Poll (der denselben
+// Client anfassen und die Aufruf-Zählung verfälschen würde) gar nicht erst beginnt — die
+// einzigen `health()`-Aufrufe in diesem Test stammen von der setup-Achse.
+//
+// Vor dem Fix (kein Generations-Token): ROT — der nach der neuen Schreibung freigegebene alte
+// Aufruf überschreibt `setup` mit dem veralteten `.hidden`-Wert. Nach dem Fix: GRÜN — `setup`
+// bleibt beim `.downloading`-Wert der neuen Task.
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func ueberholteSetupTaskUeberschreibtNeuenWertNicht() async {
+    let engineGate = AsyncGate()
+    let staleGate = AsyncGate()
+    let client = StaleFirstCallHealthClient(
+        gate: staleGate,
+        stale: .success(healthMitModels(state: "ready")),   // → .hidden, der veraltete Wert
+        fresh: .success(healthMitModels(state: "downloading", downloaded: 10, total: 100)))
+    let state = AppState(lifecycle: BlockingLifecycle(gate: engineGate), client: client,
+                         permissions: FakePermissions(granted: true),
+                         pollIntervalStarting: .milliseconds(10), pollIntervalReady: .milliseconds(10),
+                         permissionsInterval: .seconds(3600), setupInterval: .milliseconds(1))
+
+    // Erster Start: setzt die ALTE setup-Task (Generation 1) in Gang und hängt danach selbst in
+    // lifecycle.start() (blockiert über engineGate).
+    let firstStart = Task { await state.start() }
+
+    var firstCall = client.firstCallStarted.makeAsyncIterator()
+    _ = await firstCall.next()   // die ALTE Task hängt jetzt in ihrem health()-Aufruf (staleGate)
+
+    // Zweiter Start (wie bei restart()/doppeltem Hotkey-Druck): cancelt die alte setup-Task, OHNE
+    // auf ihr Ende zu warten, und startet die NEUE (Generation 2).
+    let secondStart = Task { await state.start() }
+
+    await warteBisMitEchterZeit(obergrenze: .seconds(2)) {
+        state.setup == .downloading(fraction: 0.1, downloadedBytes: 10, totalBytes: 100)
+    }
+    #expect(state.setup == .downloading(fraction: 0.1, downloadedBytes: 10, totalBytes: 100),
+            "Vorbedingung: die NEUE setup-Task hat bereits geschrieben")
+
+    staleGate.release()   // der hängende Aufruf der ALTEN Task löst jetzt (verspätet) auf
+
+    // Kooperative Yields statt fester Wartezeit — geben der (im Fehlerfall) schreibenden alten
+    // Task jede Chance, sich zu zeigen, exakt wie in `doppelterStartUeberlagertKeinePollTasks()`.
+    for _ in 0 ..< 200 { await Task.yield() }
+
+    #expect(state.setup == .downloading(fraction: 0.1, downloadedBytes: 10, totalBytes: 100),
+            "eine überholte ALTE setup-Task darf den frischen Wert der neuen Task nicht überschreiben")
+
+    engineGate.release()
+    await firstStart.value
+    await secondStart.value
     await state.shutdown()
 }
 
