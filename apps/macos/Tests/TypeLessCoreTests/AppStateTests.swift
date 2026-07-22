@@ -154,6 +154,114 @@ final class GatedClient: SidecarClient, @unchecked Sendable {
     }
 }
 
+/// Simples Einmal-Signal für Tests: ``wait()`` hängt, bis ``release()`` gerufen wurde — danach
+/// kehrt jeder (auch ein späterer) ``wait()``-Aufruf sofort zurück. Für Task 5 gebraucht, um
+/// ``BlockingLifecycle/start()`` gezielt (ohne feste Wartezeit) offen zu halten, während der Test
+/// die setup-Achse währenddessen beobachtet.
+final class AsyncGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var released = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    /// Synchron aus demselben Grund wie ``FakeLifecycle/record(_:)`` — `lock`/`unlock` dürfen
+    /// unter Swift 6.3 nicht direkt im `async`-Funktionskörper stehen.
+    private func registerOrResolveImmediately(_ continuation: CheckedContinuation<Void, Never>) {
+        lock.lock()
+        if released {
+            lock.unlock()
+            continuation.resume()
+            return
+        }
+        waiters.append(continuation)
+        lock.unlock()
+    }
+
+    func wait() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            registerOrResolveImmediately(continuation)
+        }
+    }
+
+    /// Nicht `async` — darf deshalb direkt lock/unlock aufrufen (s. Kommentar an
+    /// ``registerOrResolveImmediately(_:)``), auch wenn der Aufrufer selbst in einem `async`-
+    /// Testkörper steht (die Restriktion betrifft die *lexikalische* Umgebung des Aufrufs, nicht
+    /// die Aufrufkette — genau wie bei ``GatedClient/setResult(_:)``).
+    func release() {
+        lock.lock()
+        released = true
+        let toResume = waiters
+        waiters = []
+        lock.unlock()
+        for continuation in toResume {
+            continuation.resume()
+        }
+    }
+}
+
+/// Lifecycle, dessen `start()` erst zurückkehrt, wenn der Test es über ein ``AsyncGate``
+/// freigibt — simuliert `DefaultSidecarLifecycle.start()`s `waitForReady()`-Schleife, die die
+/// gesamte Download-Phase blockiert. Genau diese Lücke deckte ``FakeLifecycle`` nicht ab: Dessen
+/// `start()` kehrt synchron/sofort zurück, sodass ein `setup`-Poll, der erst NACH `start()`
+/// beginnt, den Download-Zustand nie beobachten könnte — der eigentliche Blindspot, den die
+/// bisherigen Tests verdeckt haben.
+final class BlockingLifecycle: SidecarLifecycle, @unchecked Sendable {
+    private let gate: AsyncGate
+    private let result: Result<SidecarOwnership, LifecycleError>
+
+    init(gate: AsyncGate, result: Result<SidecarOwnership, LifecycleError> = .success(.spawned)) {
+        self.gate = gate
+        self.result = result
+    }
+
+    func start() async throws -> SidecarOwnership {
+        await gate.wait()
+        return try result.get()
+    }
+
+    func stop() async {}
+}
+
+/// Nicht-blockierender Client, der bei **jedem** `health()`-Aufruf ein Signal feuert (wie
+/// ``GatedClient/started``, aber OHNE den Aufruf zu gaten). Damit lässt sich deterministisch
+/// abwarten, dass die setup-Achse einen Poll **verarbeitet** hat — ohne feste Wartezeit und ohne
+/// den Aufruf zu blockieren. Bewusst kein ``GatedClient``: Ein gegateter `health()` würde die
+/// setup-Achse beim `shutdown()` verklemmen (``stopSetupPolling()`` wartet auf `value`), und die
+/// setup-Achse dieses Tests soll ja gerade FREI durchlaufen, während allein `lifecycle.start()`
+/// blockiert.
+final class SignalingHealthClient: SidecarClient, @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: Result<HealthState, SidecarError>
+    let pinged: AsyncStream<Void>
+    private let pingedContinuation: AsyncStream<Void>.Continuation
+
+    init(_ result: Result<HealthState, SidecarError>) {
+        self.result = result
+        (pinged, pingedContinuation) = AsyncStream<Void>.makeStream()
+    }
+
+    func setResult(_ new: Result<HealthState, SidecarError>) {
+        lock.lock(); result = new; lock.unlock()
+    }
+
+    /// Synchron aus demselben Grund wie ``StaticClient/currentState()``.
+    private func currentResult() -> Result<HealthState, SidecarError> {
+        lock.lock(); defer { lock.unlock() }
+        return result
+    }
+
+    func health() async throws -> HealthState {
+        pingedContinuation.yield()   // feuert am EINTRITT — vor der Rückgabe
+        return try currentResult().get()
+    }
+
+    func preload() async throws {}
+    func unload() async throws {}
+    func ensureModels() async throws {}
+    func process(pcm: Data, mode: Mode, language: String?) async throws -> ProcessResult {
+        fatalError("in diesen Tests nicht benutzt")
+    }
+}
+
 struct FakePermissions: PermissionsService {
     let granted: Bool
     func status() -> PermissionStatus {
@@ -221,8 +329,18 @@ final class MutablePermissions: PermissionsService, @unchecked Sendable {
 
 @MainActor
 func makeAppState(lifecycle: SidecarLifecycle, client: SidecarClient) -> AppState {
+    // `setupInterval` bewusst RIESIG: Die setup-Achse (Task 5) pollt `client.health()` — dieselbe
+    // Methode, die der `GatedClient` in mehreren Tests hier absichtlich blockiert, um den
+    // Engine-Poll allein zu steuern. Da die Achse „erst schlafen, dann fragen" arbeitet
+    // (s. `AppState.startSetupPolling()`), schläft sie mit diesem Intervall über die gesamte
+    // (Millisekunden-)Laufzeit dieser Tests und ruft `health()` NIE — der `shutdown()`-`cancel()`
+    // beendet sie mitten im Schlaf, bevor sie den geteilten Gate-Client anfassen kann. So bleibt
+    // die sorgfältige Aufruf-Buchführung dieser Tests (`totalCalls`, `maxConcurrentCalls`, die
+    // FIFO-`release()`-Reihenfolge) von der zweiten Achse unberührt. Tests, die die setup-Achse
+    // selbst prüfen, bauen `AppState` direkt mit einem kleinen `setupInterval`.
     AppState(lifecycle: lifecycle, client: client, permissions: FakePermissions(granted: true),
-             pollIntervalStarting: .milliseconds(10), pollIntervalReady: .milliseconds(10))
+             pollIntervalStarting: .milliseconds(10), pollIntervalReady: .milliseconds(10),
+             setupInterval: .seconds(3600))
 }
 
 /// Wie ``health(_:error:)`` aus SidecarLifecycleTests.swift, aber mit einem frei wählbaren
@@ -427,28 +545,83 @@ func engineMeldetFailedStatusWirdMitKlartextUebernommen() async {
     await state.shutdown()
 }
 
-// M8-Verteilung Teil 2b: `setup` wird aus demselben `health()`-Ergebnis abgeleitet, aus dem der
-// Poll auch `engine` setzt — kein zweiter Netzaufruf. Dieselbe Achse, derselbe Aufbau wie
-// `engineMeldetFailedStatusWirdMitKlartextUebernommen()` oben: `GatedClient` + `started`-Stream,
-// damit deterministisch auf den zweiten Poll gewartet werden kann, statt auf eine feste Zeit.
+// Task 5 (Fix für den Handprobe-Befund zu M8-Verteilung Teil 2b): `setup` kommt seit diesem Task
+// NICHT mehr aus dem Engine-Poll (der lief nur nach einem ERFOLGREICHEN `lifecycle.start()` —
+// genau die Zeitspanne, die den Download blockierend verdeckt), sondern aus einer eigenen,
+// unabhängigen setup-Achse (`startSetupPolling()`). Diese Mutationsprobe ist der eigentliche
+// Beweis: `setup` muss `.downloading` werden, WÄHREND `lifecycle.start()` noch läuft — mit der
+// alten Struktur (setup nur in `pollOnce()`, das erst nach `lifecycle.start()` startet) kann das
+// strukturell nie passieren, ganz gleich wie das Timing ausfällt. `BlockingLifecycle` macht genau
+// dieses Fenster beobachtbar, das `FakeLifecycle` (kehrt sofort zurück) bisher verdeckt hat.
+//
+// Deterministisch OHNE feste Wartezeit — nach dem Vorbild der `GatedClient`-Tests, nur mit dem
+// nicht-blockierenden `SignalingHealthClient`: Die setup-Achse ist streng sequenziell
+// (`sleep` → `health()` → `setup = …`), also belegt das Eintreffen des ZWEITEN `health()`-Pings,
+// dass der erste Poll bereits vollständig in `setup` verarbeitet wurde. `lifecycle.start()` bleibt
+// bis `gate.release()` blockiert, daher stammen beide Pings zwangsläufig aus der setup-Achse
+// (der Engine-Poll startet erst NACH `lifecycle.start()`).
+//
+// Vor dem Fix (setup-Achse existiert noch nicht): ROT — es fällt nie ein `health()`-Ping (nur der
+// Engine-Poll fragt, und der startet nie, weil `lifecycle.start()` blockiert), `pinged.next()`
+// liefert nichts, der Test läuft in sein `.timeLimit`. Nach dem Fix: GRÜN in Millisekunden.
 @MainActor
 @Test(.timeLimit(.minutes(1)))
-func pollSetztSetupAusModelsBlock() async {
-    let client = GatedClient(.success(health("ready")))
-    let state = makeAppState(lifecycle: FakeLifecycle(.success(.spawned)), client: client)
+func setupWirdWaehrendBlockierendemStartSichtbar() async {
+    let gate = AsyncGate()
+    let lifecycle = BlockingLifecycle(gate: gate)
+    let client = SignalingHealthClient(.success(healthMitModels(state: "downloading",
+                                                                downloaded: 1500, total: 3900)))
+    let state = AppState(lifecycle: lifecycle, client: client, permissions: FakePermissions(granted: true),
+                         pollIntervalStarting: .milliseconds(10), pollIntervalReady: .milliseconds(10),
+                         permissionsInterval: .milliseconds(10), setupInterval: .milliseconds(1))
+
+    let startTask = Task { await state.start() }   // start() blockiert in lifecycle.start()
+
+    var pinged = client.pinged.makeAsyncIterator()
+    _ = await pinged.next()   // erster setup-health()-Poll hat begonnen
+    _ = await pinged.next()   // zweiter Poll => der erste wurde bereits in `setup` verarbeitet
+
+    #expect(state.setup == .downloading(fraction: 1500.0 / 3900.0, downloadedBytes: 1500, totalBytes: 3900),
+            "die setup-Achse muss den Download-Fortschritt zeigen, WÄHREND lifecycle.start() noch läuft")
+    #expect(state.setup != .hidden, "Fenster wäre jetzt offen — WÄHREND start() noch läuft")
+    #expect(state.engine == .starting, "lifecycle.start() ist noch nicht zurück")
+
+    gate.release()                               // Download „fertig" → lifecycle.start() kehrt zurück
+    await startTask.value
+
+    await state.shutdown()
+}
+
+// Ersetzt den früheren `pollSetztSetupAusModelsBlock()`-Test (Task 3): Der prüfte, dass
+// `pollOnce()` `setup` setzt — das tut `pollOnce()` seit Task 5 nicht mehr (ein Schreiber, s.
+// `pollOnce()`-Kommentar). Diese Fassung prüft dieselbe fachliche Aussage — „setup spiegelt den
+// models-Block" — samt dem `.hidden`→`.downloading`-Übergang, aber gegen die tatsächlich
+// zuständige, unabhängige setup-Achse. Bewusst mit `StaticClient` (nicht-blockierend) +
+// `warteBisMitEchterZeit`, exakt wie die beiden Rechte-Achsen-Tests oben: ein gemeinsames Gate
+// würde die Achsen künstlich koppeln, was der Fix gerade entkoppelt hat. `warteBisMitEchterZeit`
+// kehrt zurück, sobald die Bedingung gilt (im GRÜN-Fall Millisekunden) — keine feste Wartezeit.
+// `FakeLifecycle` kehrt sofort zurück, also läuft hier auch der Engine-Poll — der `setup` seit dem
+// Fix nicht mehr anfasst; dieser Test ist zugleich die Wache dafür.
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func setupAchseSpiegeltDenModelsBlock() async {
+    let client = StaticClient(.success(health("ready")))
+    let state = AppState(lifecycle: FakeLifecycle(.success(.spawned)), client: client,
+                         permissions: FakePermissions(granted: true),
+                         pollIntervalStarting: .milliseconds(10), pollIntervalReady: .milliseconds(10),
+                         permissionsInterval: .milliseconds(10), setupInterval: .milliseconds(1))
     await state.start()
     #expect(state.engine == .ready)
     #expect(state.setup == .hidden, "vor jedem Modell-Poll bleibt das Einrichtungs-Fenster versteckt")
 
-    var iterator = client.started.makeAsyncIterator()
-    _ = await iterator.next()               // erster Poll ist in Flug
-    client.setResult(.success(healthMitModels(state: "downloading", downloaded: 1950, total: 3900)))
-    client.release()
+    client.setState(.success(healthMitModels(state: "downloading", downloaded: 1950, total: 3900)))
 
-    _ = await iterator.next()               // dieser Poll hat den neuen Wert verarbeitet
-    #expect(state.setup == .downloading(fraction: 0.5, downloadedBytes: 1950, totalBytes: 3900))
+    await warteBisMitEchterZeit(obergrenze: .seconds(2)) {
+        state.setup == .downloading(fraction: 0.5, downloadedBytes: 1950, totalBytes: 3900)
+    }
+    #expect(state.setup == .downloading(fraction: 0.5, downloadedBytes: 1950, totalBytes: 3900),
+            "die setup-Achse übernimmt den models-Block unabhängig vom Engine-Poll")
 
-    client.release()
     await state.shutdown()
 }
 
@@ -635,7 +808,10 @@ func doppelterStartUeberlagertKeinePollTasks() async {
     let client = GatedClient(.success(health("ready")))
     let state = AppState(lifecycle: FakeLifecycle(.success(.spawned)), client: client,
                           permissions: FakePermissions(granted: true),
-                          pollIntervalStarting: .zero, pollIntervalReady: .zero)
+                          pollIntervalStarting: .zero, pollIntervalReady: .zero,
+                          // setup-Achse stummschalten — s. Begründung in `makeAppState`. Ohne das
+                          // fiele ihr `health()` in die Aufruf-Buchführung (`totalCalls == 2`) ein.
+                          setupInterval: .seconds(3600))
     await state.start()
 
     var iterator = client.started.makeAsyncIterator()
