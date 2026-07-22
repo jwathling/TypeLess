@@ -40,7 +40,11 @@ public struct HTTPSidecarClient: SidecarClient {
         let dto: HealthDTO = try decode(response)
         return HealthState(status: dto.status, sttLoaded: dto.stt_loaded, llmLoaded: dto.llm_loaded,
                            busy: dto.busy, sttModel: dto.stt_model, llmModel: dto.llm_model,
-                           error: dto.error)
+                           error: dto.error,
+                           models: ModelsStatus(state: dto.models.state,
+                                                downloadedBytes: dto.models.downloaded_bytes,
+                                                totalBytes: dto.models.total_bytes,
+                                                error: dto.models.error))
     }
 
     public func preload() async throws {

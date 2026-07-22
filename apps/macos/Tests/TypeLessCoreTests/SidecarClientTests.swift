@@ -4,7 +4,8 @@ import Testing
 
 private let gesundJSON = """
 {"status":"ready","stt_loaded":true,"llm_loaded":false,"busy":false,
- "stt_model":"whisper","llm_model":"qwen","error":null}
+ "stt_model":"whisper","llm_model":"qwen","error":null,
+ "models":{"state":"ready","downloaded_bytes":0,"total_bytes":0,"error":null}}
 """
 
 @Test func healthWirdUebersetzt() async throws {
@@ -21,12 +22,29 @@ private let gesundJSON = """
     #expect(health.error == nil)
 }
 
+@Test func healthParstModelsBlock() async throws {
+    let server = try FakeSidecarServer()
+    defer { server.stop() }
+    server.respond(status: 200, json: """
+    {"status":"starting","stt_loaded":false,"llm_loaded":false,"busy":false,
+     "stt_model":"s","llm_model":"l","error":null,
+     "models":{"state":"downloading","downloaded_bytes":1500,"total_bytes":3900,"error":null}}
+    """)
+
+    let client = HTTPSidecarClient(socketPath: server.socketPath)
+    let state = try await client.health()
+
+    #expect(state.models == ModelsStatus(state: "downloading", downloadedBytes: 1500,
+                                         totalBytes: 3900, error: nil))
+}
+
 @Test func healthMeldetFehlerzustandMitGrund() async throws {
     let server = try FakeSidecarServer()
     defer { server.stop() }
     server.respond(status: 200, json: """
     {"status":"failed","stt_loaded":false,"llm_loaded":false,"busy":false,
-     "stt_model":"whisper","llm_model":"qwen","error":"STT-Warm-up fehlgeschlagen: 401"}
+     "stt_model":"whisper","llm_model":"qwen","error":"STT-Warm-up fehlgeschlagen: 401",
+     "models":{"state":"ready","downloaded_bytes":0,"total_bytes":0,"error":null}}
     """)
 
     let client = HTTPSidecarClient(socketPath: server.socketPath)

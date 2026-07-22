@@ -5,6 +5,21 @@ public enum Mode: String, Sendable, CaseIterable {
     case diktat, prompt, email, slack, braindump
 }
 
+/// Zustand des Modell-Bootstraps (Teil des ``/health``-Reports, aus Teil 2a).
+public struct ModelsStatus: Sendable, Equatable {
+    public let state: String  // "missing" | "downloading" | "ready" | "failed"
+    public let downloadedBytes: Int
+    public let totalBytes: Int
+    public let error: String?
+
+    public init(state: String, downloadedBytes: Int, totalBytes: Int, error: String?) {
+        self.state = state
+        self.downloadedBytes = downloadedBytes
+        self.totalBytes = totalBytes
+        self.error = error
+    }
+}
+
 /// Zustand des Sidecars (Antwort auf ``/health``).
 public struct HealthState: Sendable, Equatable {
     public let status: String        // "starting" | "ready" | "failed"
@@ -15,6 +30,7 @@ public struct HealthState: Sendable, Equatable {
     public let llmModel: String
     /// Klartext-Grund, wenn ``status == "failed"``.
     public let error: String?
+    public let models: ModelsStatus
 }
 
 /// Ergebnis eines Diktats — Spiegelung von ``ProcessResult`` aus der Engine.
@@ -51,6 +67,13 @@ public enum SidecarError: Error, Equatable, Sendable {
 
 // MARK: - JSON-Formen des Sidecars (snake_case)
 
+struct ModelsDTO: Decodable {
+    let state: String
+    let downloaded_bytes: Int
+    let total_bytes: Int
+    let error: String?
+}
+
 struct HealthDTO: Decodable {
     let status: String
     let stt_loaded: Bool
@@ -59,6 +82,7 @@ struct HealthDTO: Decodable {
     let stt_model: String
     let llm_model: String
     let error: String?
+    let models: ModelsDTO
 }
 
 struct ProcessDTO: Decodable {
