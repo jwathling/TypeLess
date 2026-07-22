@@ -8,6 +8,11 @@ struct TypeLessApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var state: AppState
     @State private var dictation: DictationCoordinator
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismissWindow) private var dismissWindow
+
+    /// Stabile Fenster-ID für die Einrichtungs-Szene (Erststart-Modell-Download).
+    static let setupWindowID = "typeless-setup"
 
     init() {
         // Die einzige Stelle, die konkrete Typen kennt (Komposition).
@@ -67,7 +72,28 @@ struct TypeLessApp: App {
             Image(systemName: symbol)
         }
         .menuBarExtraStyle(.menu)
+
+        // Einmaliges Einrichtungs-Fenster (M8-Verteilung Teil 2b): sichtbar nur während des
+        // Erststart-Modell-Downloads bzw. bei dessen Fehlschlag — s. ``SetupState``. Als
+        // `LSUIElement`-App (kein Dock-Icon) reicht `openWindow` allein nicht, um es nach vorne zu
+        // holen; `NSApp.activate` ist nötig, sonst bleibt es hinter anderen Fenstern verborgen.
+        Window("TypeLess Einrichtung", id: Self.setupWindowID) {
+            SetupWindow(state: state)
+                .onChange(of: istEinrichtung) { _, sichtbar in
+                    if sichtbar {
+                        openWindow(id: Self.setupWindowID)
+                        NSApp.activate(ignoringOtherApps: true)
+                    } else {
+                        dismissWindow(id: Self.setupWindowID)
+                    }
+                }
+        }
+        .windowResizability(.contentSize)
     }
+
+    /// Abgeleiteter Sichtbar-Flag für das Einrichtungs-Fenster — `true` bei laufendem
+    /// Erststart-Download oder Fehlschlag, `false` sobald die Modelle da sind (``SetupState``).
+    private var istEinrichtung: Bool { state.setup != .hidden }
 
     /// Das Symbol zeigt den Diktat-Zustand, solange einer läuft — sonst den der Engine. Ohne
     /// Overlay ist es die einzige sichtbare Rückmeldung (Entscheidung des Anwenders).
