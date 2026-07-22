@@ -18,6 +18,9 @@ public enum EngineState: Sendable, Equatable {
 public final class AppState {
     public private(set) var engine: EngineState = .stopped
     public private(set) var permissions: PermissionStatus
+    /// UI-Zustand des Einrichtungs-Fensters (M8-Verteilung Teil 2b) — abgeleitet aus demselben
+    /// `health()`-Ergebnis, aus dem auch ``engine`` gesetzt wird (s. ``pollOnce()``).
+    public private(set) var setup: SetupState = .hidden
 
     private let lifecycle: SidecarLifecycle
     private let client: SidecarClient
@@ -103,6 +106,12 @@ public final class AppState {
 
     public func openSettings(for permission: Permission) {
         permissionsService.openSettings(for: permission)
+    }
+
+    /// „Erneut versuchen" aus dem Einrichtungs-Fenster: stößt den Modell-Bootstrap erneut an. Der
+    /// Fortschritt/Erfolg kommt über den normalen Poll (``setup``) zurück, deshalb hier nur anstoßen.
+    public func retryModelDownload() async {
+        try? await client.ensureModels()
     }
 
     /// Fordert die Eingabeüberwachung an und aktualisiert sofort die Anzeige — beim Programmstart
@@ -208,6 +217,7 @@ public final class AppState {
     private func pollOnce() async -> Duration {
         do {
             let health = try await client.health()
+            setup = SetupState(models: health.models)
             switch health.status {
             case "ready":
                 engine = .ready
