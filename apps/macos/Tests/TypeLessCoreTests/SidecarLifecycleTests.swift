@@ -115,7 +115,8 @@ final class ScriptedClient: SidecarClient, @unchecked Sendable {
 
 func health(_ status: String, error: String? = nil) -> HealthState {
     HealthState(status: status, sttLoaded: status == "ready", llmLoaded: false, busy: false,
-                sttModel: "whisper", llmModel: "qwen", error: error)
+                sttModel: "whisper", llmModel: "qwen", error: error,
+                models: ModelsStatus(state: "ready", downloadedBytes: 0, totalBytes: 0, error: nil))
 }
 
 /// Baut ein `EngineLaunch` mit den bisherigen Test-Default-Werten (Entwicklungs-Start:

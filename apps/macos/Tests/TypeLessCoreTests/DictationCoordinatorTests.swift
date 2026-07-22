@@ -42,7 +42,8 @@ final class DictationClient: SidecarClient, @unchecked Sendable {
 
     func health() async throws -> HealthState {
         HealthState(status: "ready", sttLoaded: true, llmLoaded: true, busy: false,
-                    sttModel: "w", llmModel: "q", error: nil)
+                    sttModel: "w", llmModel: "q", error: nil,
+                    models: ModelsStatus(state: "ready", downloadedBytes: 0, totalBytes: 0, error: nil))
     }
 
     func preload() async throws {
@@ -168,7 +169,8 @@ final class GatedDictationClient: SidecarClient, @unchecked Sendable {
 
     func health() async throws -> HealthState {
         HealthState(status: "ready", sttLoaded: true, llmLoaded: true, busy: false,
-                    sttModel: "w", llmModel: "q", error: nil)
+                    sttModel: "w", llmModel: "q", error: nil,
+                    models: ModelsStatus(state: "ready", downloadedBytes: 0, totalBytes: 0, error: nil))
     }
 
     func preload() async throws {}
