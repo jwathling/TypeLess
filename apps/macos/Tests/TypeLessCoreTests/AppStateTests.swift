@@ -225,6 +225,40 @@ func makeAppState(lifecycle: SidecarLifecycle, client: SidecarClient) -> AppStat
              pollIntervalStarting: .milliseconds(10), pollIntervalReady: .milliseconds(10))
 }
 
+/// Wie ``health(_:error:)`` aus SidecarLifecycleTests.swift, aber mit einem frei wählbaren
+/// ``ModelsStatus`` — für die Tests des Einrichtungs-Fensters (M8-Verteilung Teil 2b).
+func healthMitModels(state: String, downloaded: Int = 0, total: Int = 0,
+                     error: String? = nil) -> HealthState {
+    HealthState(status: "ready", sttLoaded: true, llmLoaded: false, busy: false,
+               sttModel: "whisper", llmModel: "qwen", error: nil,
+               models: ModelsStatus(state: state, downloadedBytes: downloaded, totalBytes: total,
+                                    error: error))
+}
+
+/// Zählt die Aufrufe von ``ensureModels()`` — für den Beleg, dass „Erneut versuchen" den
+/// Modell-Bootstrap tatsächlich anstößt.
+final class CountingFakeSidecarClient: SidecarClient, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _ensureModelsCalls = 0
+    var ensureModelsCalls: Int { lock.lock(); defer { lock.unlock() }; return _ensureModelsCalls }
+
+    /// Synchron aus demselben Grund wie ``FakeLifecycle/record(_:)`` — `lock`/`unlock` dürfen
+    /// unter Swift 6.3 nicht direkt im `async`-Funktionskörper stehen.
+    private func recordEnsureModelsCall() {
+        lock.lock(); _ensureModelsCalls += 1; lock.unlock()
+    }
+
+    func health() async throws -> HealthState { TypeLessCoreTests.health("ready") }
+    func preload() async throws {}
+    func unload() async throws {}
+    func ensureModels() async throws {
+        recordEnsureModelsCall()
+    }
+    func process(pcm: Data, mode: Mode, language: String?) async throws -> ProcessResult {
+        fatalError("in diesen Tests nicht benutzt")
+    }
+}
+
 // MARK: - Tests
 
 @MainActor
@@ -391,6 +425,41 @@ func engineMeldetFailedStatusWirdMitKlartextUebernommen() async {
 
     client.release()
     await state.shutdown()
+}
+
+// M8-Verteilung Teil 2b: `setup` wird aus demselben `health()`-Ergebnis abgeleitet, aus dem der
+// Poll auch `engine` setzt — kein zweiter Netzaufruf. Dieselbe Achse, derselbe Aufbau wie
+// `engineMeldetFailedStatusWirdMitKlartextUebernommen()` oben: `GatedClient` + `started`-Stream,
+// damit deterministisch auf den zweiten Poll gewartet werden kann, statt auf eine feste Zeit.
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func pollSetztSetupAusModelsBlock() async {
+    let client = GatedClient(.success(health("ready")))
+    let state = makeAppState(lifecycle: FakeLifecycle(.success(.spawned)), client: client)
+    await state.start()
+    #expect(state.engine == .ready)
+    #expect(state.setup == .hidden, "vor jedem Modell-Poll bleibt das Einrichtungs-Fenster versteckt")
+
+    var iterator = client.started.makeAsyncIterator()
+    _ = await iterator.next()               // erster Poll ist in Flug
+    client.setResult(.success(healthMitModels(state: "downloading", downloaded: 1950, total: 3900)))
+    client.release()
+
+    _ = await iterator.next()               // dieser Poll hat den neuen Wert verarbeitet
+    #expect(state.setup == .downloading(fraction: 0.5, downloadedBytes: 1950, totalBytes: 3900))
+
+    client.release()
+    await state.shutdown()
+}
+
+@MainActor
+@Test func retryRuftEnsureModels() async {
+    let client = CountingFakeSidecarClient()
+    let state = makeAppState(lifecycle: FakeLifecycle(.success(.spawned)), client: client)
+
+    await state.retryModelDownload()
+
+    #expect(client.ensureModelsCalls == 1)
 }
 
 // Finding I1 (Review M3): `refreshPermissions()` wurde außerhalb der Tests nie aufgerufen —
