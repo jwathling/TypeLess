@@ -35,6 +35,9 @@ public final class AppState {
     private var pollTask: Task<Void, Never>?
     private var permissionsTask: Task<Void, Never>?
     private var setupTask: Task<Void, Never>?
+    /// Generations-Token gegen die stale-write-Race der setup-Achse (Task 6, Review-Fund zu
+    /// Task 5) — s. ausführliche Begründung bei ``startSetupPolling()``.
+    private var setupGeneration = 0
 
     public init(lifecycle: SidecarLifecycle,
                 client: SidecarClient,
@@ -220,14 +223,35 @@ public final class AppState {
     /// **keinen weiteren** `health()`-Aufruf mehr absetzen — sonst bliebe sie an einem
     /// test-seitig gegateten `health()` hängen und ``stopSetupPolling()`` (das auf `value` wartet)
     /// verklemmte. Deshalb nach dem Schlaf **vor** dem Aufruf noch einmal auf Abbruch prüfen.
+    ///
+    /// **Task 6 (Review-Fund zu Task 5) — Generations-Token gegen stale-write:** Der `cancel()`
+    /// oben wartet (anders als ``stopPolling()``) NICHT auf das Ende der alten Task — bewusst,
+    /// s. Kommentar in ``start()`` dazu, warum ein zusätzliches `await` hier die sensible
+    /// `doppelterStartUeberlagertKeinePollTasks`-Reihenfolge verschieben würde. Für die Rechte-
+    /// Achse ist das gefahrlos (sie liest synchron, s. ``startPermissionsPolling()``), für DIESE
+    /// Achse aber nicht: Sie schreibt erst NACH einem `await self.client.health()`. Cancelt ein
+    /// erneuter Start (z. B. `restart()`) die alte Task, während deren `health()`-Aufruf noch
+    /// hängt, kann dieser Aufruf NACH dem frischen Schreiben der neuen Task auflösen und `setup`
+    /// auf einen veralteten Wert zurückwerfen (Mutationsprobe:
+    /// ``ueberholteSetupTaskUeberschreibtNeuenWertNicht()``). Das Token schließt die Lücke, OHNE
+    /// ein `await` in `startSetupPolling()` selbst einzuführen: Jede Task bekommt bei ihrer
+    /// Erzeugung ihre eigene `generation`; unmittelbar NACH dem `await health()` — zurück auf dem
+    /// MainActor, ohne weiteres `await` bis zum Schreiben — prüft sie, ob sie noch die AKTUELLE
+    /// ist. Eine überholte Task erkennt sich daran selbst und lässt `setup` in Ruhe.
     private func startSetupPolling() {
         setupTask?.cancel()
+        setupGeneration &+= 1
+        let generation = setupGeneration
         setupTask = Task { [weak self] in
             while !Task.isCancelled {
-                guard let self else { return }
-                try? await Task.sleep(for: self.setupInterval)
-                if Task.isCancelled { return }
+                try? await Task.sleep(for: self?.setupInterval ?? .seconds(1))
+                guard let self, !Task.isCancelled else { return }
                 if let health = try? await self.client.health() {
+                    // Zurück auf dem MainActor: Nur die AKTUELLE Task schreibt. Eine durch einen
+                    // erneuten Start (restart/doppelter start) überholte Task hat ein veraltetes
+                    // `generation` und lässt `setup` in Ruhe — sonst überschriebe ihr noch
+                    // schwebender health()-Aufruf den frischen Wert der neuen Task (stale-write).
+                    guard self.setupGeneration == generation else { return }
                     self.setup = SetupState(models: health.models)
                 }
             }
