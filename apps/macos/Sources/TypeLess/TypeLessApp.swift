@@ -1,3 +1,5 @@
+import AppKit
+import Observation
 import SwiftUI
 import TypeLessCore
 
@@ -8,11 +10,6 @@ struct TypeLessApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var state: AppState
     @State private var dictation: DictationCoordinator
-    @Environment(\.openWindow) private var openWindow
-    @Environment(\.dismissWindow) private var dismissWindow
-
-    /// Stabile Fenster-ID für die Einrichtungs-Szene (Erststart-Modell-Download).
-    static let setupWindowID = "typeless-setup"
 
     init() {
         // Die einzige Stelle, die konkrete Typen kennt (Komposition).
@@ -66,34 +63,18 @@ struct TypeLessApp: App {
     }
 
     var body: some Scene {
+        // Das einmalige Einrichtungs-Fenster (M8-Verteilung Teil 2b) ist bewusst KEINE
+        // SwiftUI-`Window`-Szene mehr (Task 7, Fix nach finalem Review): SwiftUI wertet den Body
+        // einer geschlossenen `Window`-Szene nicht aus, ein `.onChange` darin öffnet also nie
+        // deterministisch. Stattdessen treibt `AppDelegate.beobachteSetup()` ein direkt
+        // verwaltetes `NSWindow` mit `SetupWindow` als Inhalt — s. dort.
         MenuBarExtra {
             MenuContent(state: state, dictation: dictation)
         } label: {
             Image(systemName: symbol)
         }
         .menuBarExtraStyle(.menu)
-
-        // Einmaliges Einrichtungs-Fenster (M8-Verteilung Teil 2b): sichtbar nur während des
-        // Erststart-Modell-Downloads bzw. bei dessen Fehlschlag — s. ``SetupState``. Als
-        // `LSUIElement`-App (kein Dock-Icon) reicht `openWindow` allein nicht, um es nach vorne zu
-        // holen; `NSApp.activate` ist nötig, sonst bleibt es hinter anderen Fenstern verborgen.
-        Window("TypeLess Einrichtung", id: Self.setupWindowID) {
-            SetupWindow(state: state)
-                .onChange(of: istEinrichtung) { _, sichtbar in
-                    if sichtbar {
-                        openWindow(id: Self.setupWindowID)
-                        NSApp.activate(ignoringOtherApps: true)
-                    } else {
-                        dismissWindow(id: Self.setupWindowID)
-                    }
-                }
-        }
-        .windowResizability(.contentSize)
     }
-
-    /// Abgeleiteter Sichtbar-Flag für das Einrichtungs-Fenster — `true` bei laufendem
-    /// Erststart-Download oder Fehlschlag, `false` sobald die Modelle da sind (``SetupState``).
-    private var istEinrichtung: Bool { state.setup != .hidden }
 
     /// Das Symbol zeigt den Diktat-Zustand, solange einer läuft — sonst den der Engine. Ohne
     /// Overlay ist es die einzige sichtbare Rückmeldung (Entscheidung des Anwenders).
@@ -137,8 +118,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var state: AppState?
     var dictation: DictationCoordinator?
 
+    private var setupWindow: NSWindow?
+
+    /// Beobachtet ``AppState/setup`` und öffnet/schließt das Einrichtungs-Fenster von einer
+    /// IMMER aktiven Stelle aus (der Auslöser darf nicht im Fenster-Inhalt sitzen — SwiftUI wertet
+    /// eine geschlossene ``Window``-Szene nicht aus). ``withObservationTracking`` feuert einmalig,
+    /// daher am Ende erneut registrieren.
+    private func beobachteSetup() {
+        withObservationTracking {
+            _ = state?.setup
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                self?.aktualisiereSetupFenster()
+                self?.beobachteSetup()
+            }
+        }
+    }
+
+    @MainActor private func aktualisiereSetupFenster() {
+        guard let state else { return }
+        switch state.setup {
+        case .hidden:
+            setupWindow?.close()
+            setupWindow = nil
+        case .downloading, .failed:
+            if setupWindow == nil {
+                let hosting = NSHostingController(rootView: SetupWindow(state: state))
+                let window = NSWindow(contentViewController: hosting)
+                window.title = "TypeLess Einrichtung"
+                window.styleMask = [.titled]           // bewusst NICHT schließbar: die Einrichtung
+                window.isReleasedWhenClosed = false      // steuert das Fenster, nicht der Nutzer
+                setupWindow = window
+            }
+            setupWindow?.center()
+            setupWindow?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)      // LSUIElement: sonst bleibt es im Hintergrund
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard let state, let dictation else { return }
+
+        // Einrichtungs-Fenster (Task 7): einmal sofort synchronisieren (falls `setup` beim
+        // Start bereits sichtbar ist — z. B. nach einem Neustart mitten im Erststart-Download)
+        // und danach über `beobachteSetup()` auf jede weitere Änderung reagieren. AppDelegate
+        // lebt für die gesamte Programmlaufzeit — anders als eine `Window`-Szene, deren Body
+        // SwiftUI nicht auswertet, solange ihr Fenster geschlossen ist.
+        aktualisiereSetupFenster()
+        beobachteSetup()
+
         // BEIDE in EIGENEN Tasks — nacheinander wäre ein Fehler: `state.start()` kehrt erst
         // zurück, wenn die Engine fertig aufgewärmt ist (~20 s, s. `SidecarLifecycle
         // .waitForReady()`). Hing `dictation.start()` an dessen `await`, war der Fn-Hotkey in
