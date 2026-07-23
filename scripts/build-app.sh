@@ -75,6 +75,16 @@ cp "$UV_BIN" "$ENGINE_DST/uv"
 chmod +x "$ENGINE_DST/uv"
 echo "   eingebettet: uv ($("$ENGINE_DST/uv" --version)) + typeless_engine + uv.lock"
 
+# --- Sparkle.framework einbetten (Selbst-Update) ---
+# Reines `swift build` hat keine Xcode-Copy-Phase; das Framework wird von Hand ins Bundle gelegt.
+# Sparkle bringt verschachtelte Helfer mit (XPCServices, Autoupdate, Updater.app), die einzeln und
+# VON INNEN NACH AUSSEN signiert werden müssen — `--deep` allein signiert sie nicht zuverlässig.
+SPARKLE_FW="$(find "$(swift build -c "$CONFIG" --show-bin-path)" -maxdepth 1 -name 'Sparkle.framework' -type d | head -1)"
+[ -n "$SPARKLE_FW" ] || { echo "FEHLER: Sparkle.framework im Build-Output nicht gefunden" >&2; exit 1; }
+mkdir -p "$APP/Contents/Frameworks"
+cp -R "$SPARKLE_FW" "$APP/Contents/Frameworks/Sparkle.framework"
+echo "== Sparkle.framework eingebettet aus $SPARKLE_FW =="
+
 # macOS bindet Mikrofon-/Bedienungshilfen-/Eingabeüberwachungs-Rechte an die SIGNATUR-Identität.
 # Eine Ad-hoc-Signatur (`--sign -`) erzeugt bei JEDEM Neubau eine neue Identität — die Rechte
 # gehen dann jedes Mal verloren, obwohl der Schalter in den Einstellungen noch „an" aussieht (er
@@ -86,12 +96,22 @@ echo "   eingebettet: uv ($("$ENGINE_DST/uv" --version)) + typeless_engine + uv.
 # Ein echtes Apple-Zertifikat (für die Weitergabe an andere) gibt es erst in M8.
 SIGN_IDENTITY="${TYPELESS_SIGN_IDENTITY:-TypeLess Dev}"
 if security find-identity -p codesigning 2>/dev/null | grep -q "$SIGN_IDENTITY"; then
+  SIGN_ARGS=(--force --sign "$SIGN_IDENTITY")
   echo "== signieren mit stabiler Identität: $SIGN_IDENTITY =="
-  codesign --force --deep --sign "$SIGN_IDENTITY" "$APP"
 else
+  SIGN_ARGS=(--force --sign -)
   echo "== stabile Identität '$SIGN_IDENTITY' nicht gefunden — ad-hoc (Rechte gehen bei jedem Neubau verloren) =="
   echo "   Einmalig einrichten: bash scripts/setup-signing-identity.sh"
-  codesign --force --deep --sign - "$APP"
 fi
+
+# Von innen nach außen: erst die verschachtelten Sparkle-Helfer, dann das Framework, zuletzt die App.
+FW="$APP/Contents/Frameworks/Sparkle.framework"
+if [ -d "$FW" ]; then
+  while IFS= read -r -d '' nested; do
+    codesign "${SIGN_ARGS[@]}" "$nested"
+  done < <(find "$FW/Versions/Current" \( -name '*.xpc' -o -name '*.app' -o -name 'Autoupdate' \) -print0)
+  codesign "${SIGN_ARGS[@]}" "$FW"
+fi
+codesign "${SIGN_ARGS[@]}" "$APP"
 
 echo "Fertig: apps/macos/$APP"
