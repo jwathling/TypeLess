@@ -21,3 +21,8 @@ xcuserdata/
 models/
 *.gguf
 *.safetensors
+
+# TypeLess-Verteilung: geheime Schlüssel-Exporte NIE einchecken
+*.p12
+typeless-sparkle-private-key.txt
+TypeLess-*.zip
