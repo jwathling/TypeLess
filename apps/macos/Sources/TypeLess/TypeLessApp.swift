@@ -72,7 +72,7 @@ struct TypeLessApp: App {
         // deterministisch. Stattdessen treibt `AppDelegate.beobachteSetup()` ein direkt
         // verwaltetes `NSWindow` mit `SetupWindow` als Inhalt — s. dort.
         MenuBarExtra {
-            MenuContent(state: state, dictation: dictation)
+            MenuContent(state: state, dictation: dictation, checkForUpdates: updater.checkForUpdates)
         } label: {
             Image(systemName: symbol)
         }

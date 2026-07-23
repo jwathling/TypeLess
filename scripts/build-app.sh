@@ -32,6 +32,12 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/TypeLess"
 
+# Öffentlicher EdDSA-Schlüssel (nicht geheim) für Sparkles Update-Verifikation.
+ED_PUBLIC_KEY="$(tr -d ' \t\n\r' < "$SCRIPT_DIR/../apps/macos/sparkle_public_key.txt" 2>/dev/null || true)"
+[ -n "$ED_PUBLIC_KEY" ] || echo "WARNUNG: kein Sparkle-Public-Key (sparkle_public_key.txt) — Updates nicht verifizierbar" >&2
+# Feed-URL: Roh-URL der appcast.xml im GitHub-Repo. Der Benutzername wird in Task 6 gesetzt.
+SU_FEED_URL="${TYPELESS_FEED_URL:-https://raw.githubusercontent.com/PLACEHOLDER_GH_USER/TypeLess/main/appcast.xml}"
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -49,6 +55,12 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <!-- Wird ab M4 gebraucht; muss beim ERSTEN Mikrofonzugriff bereits im Bundle stehen. -->
     <key>NSMicrophoneUsageDescription</key>
     <string>TypeLess nimmt dein Diktat auf und verarbeitet es vollständig lokal auf diesem Mac.</string>
+    <!-- Selbst-Update (M8-Verteilung Teil 3): automatisch prüfen, aber VOR Download/Installation
+         fragen. Kein automatisches Herunterladen/Installieren. -->
+    <key>SUFeedURL</key><string>$SU_FEED_URL</string>
+    <key>SUPublicEDKey</key><string>$ED_PUBLIC_KEY</string>
+    <key>SUEnableAutomaticChecks</key><true/>
+    <key>SUScheduledCheckInterval</key><integer>86400</integer>
 </dict>
 </plist>
 PLIST

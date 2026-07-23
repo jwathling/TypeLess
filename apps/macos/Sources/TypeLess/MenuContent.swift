@@ -8,6 +8,9 @@ import TypeLessCore
 struct MenuContent: View {
     let state: AppState
     let dictation: DictationCoordinator
+    /// Löst den Sparkle-Update-Check aus (Verdrahtung in TypeLessApp; hier nur ein Auslöser, keine
+    /// Logik — MenuContent bleibt anzeigend).
+    let checkForUpdates: () -> Void
 
     var body: some View {
         Text(statusText)
@@ -56,6 +59,10 @@ struct MenuContent: View {
         }
 
         Divider()
+
+        Button("Nach Updates suchen …") {
+            checkForUpdates()
+        }
 
         Button("Engine neu starten") {
             Task { await state.restart() }
