@@ -33,7 +33,10 @@ echo "== 4/6 EdDSA-Signatur des Zips =="
 SIGN_UPDATE="$(find "$REPO/apps/macos/.build" -name sign_update -type f -perm -u+x | head -1)"
 [ -n "$SIGN_UPDATE" ] || { echo "FEHLER: sign_update nicht gefunden (swift build in apps/macos?)" >&2; exit 1; }
 # sign_update gibt eine Zeile wie: sparkle:edSignature="…" length="…"  — wir brauchen die Signatur.
-SIGN_OUT="$("$SIGN_UPDATE" "$ZIP")"
+if ! SIGN_OUT="$("$SIGN_UPDATE" "$ZIP" 2>&1)"; then
+  echo "FEHLER: sign_update fehlgeschlagen (privater EdDSA-Schlüssel im Schlüsselbund? Zip lesbar?): $SIGN_OUT" >&2
+  exit 1
+fi
 ED_SIG="$(printf '%s' "$SIGN_OUT" | sed -n 's/.*sparkle:edSignature="\([^"]*\)".*/\1/p')"
 [ -n "$ED_SIG" ] || { echo "FEHLER: EdDSA-Signatur nicht aus sign_update-Ausgabe gelesen: $SIGN_OUT" >&2; exit 1; }
 PUB_DATE="$(LC_ALL=C date -u '+%a, %d %b %Y %H:%M:%S +0000')"
