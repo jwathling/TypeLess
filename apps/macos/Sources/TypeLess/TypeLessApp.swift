@@ -10,6 +10,9 @@ struct TypeLessApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var state: AppState
     @State private var dictation: DictationCoordinator
+    // Hält Sparkle am Leben. Instanziierung hier lädt das eingebettete Framework beim Start —
+    // der eigentliche Einbettungs-Beweis dieses Tasks.
+    @State private var updater = UpdaterController()
 
     init() {
         // Die einzige Stelle, die konkrete Typen kennt (Komposition).
