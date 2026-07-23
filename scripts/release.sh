@@ -15,7 +15,7 @@ VERSION="$(tr -d ' \t\n\r' < "$REPO/VERSION")"
 APP="$REPO/apps/macos/TypeLess.app"
 ZIP="$REPO/TypeLess-$VERSION.zip"
 APPCAST="$REPO/appcast.xml"
-GH_USER="${TYPELESS_GH_USER:-PLACEHOLDER_GH_USER}"
+GH_USER="${TYPELESS_GH_USER:-jwathling}"
 ASSET_URL="https://github.com/$GH_USER/TypeLess/releases/download/$VERSION/TypeLess-$VERSION.zip"
 
 echo "== 1/6 bauen + signieren (Release) =="

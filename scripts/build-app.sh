@@ -36,7 +36,7 @@ cp "$BIN" "$APP/Contents/MacOS/TypeLess"
 ED_PUBLIC_KEY="$(tr -d ' \t\n\r' < "$SCRIPT_DIR/../apps/macos/sparkle_public_key.txt" 2>/dev/null || true)"
 [ -n "$ED_PUBLIC_KEY" ] || echo "WARNUNG: kein Sparkle-Public-Key (sparkle_public_key.txt) — Updates nicht verifizierbar" >&2
 # Feed-URL: Roh-URL der appcast.xml im GitHub-Repo. Der Benutzername wird in Task 6 gesetzt.
-SU_FEED_URL="${TYPELESS_FEED_URL:-https://raw.githubusercontent.com/PLACEHOLDER_GH_USER/TypeLess/main/appcast.xml}"
+SU_FEED_URL="${TYPELESS_FEED_URL:-https://raw.githubusercontent.com/jwathling/TypeLess/main/appcast.xml}"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
