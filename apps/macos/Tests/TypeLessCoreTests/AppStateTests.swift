@@ -657,10 +657,18 @@ func setupWirdWaehrendBlockierendemStartSichtbar() async {
 // `pollOnce()` `setup` unangetastet lässt (das prüft dieser Test nicht: ein wieder eingeführter
 // zweiter Schreiber in `pollOnce()` schriebe hier denselben Wert aus derselben
 // `health()`-Momentaufnahme, der Test bliebe grün).
+//
+// Task 7 (Fix nach finalem Review Teil 2b): Der Anfangszustand ist bewusst `"missing"`, NICHT
+// mehr `health("ready")` — seit Task 7 beendet ein `models.state == "ready"` die setup-Achse
+// endgültig (s. `setupAchseEndetNachReady()`). Ein Start bei `"ready"` würde die Achse also
+// bereits vor dem ersten `client.setState(...)` unten beenden, und der erwartete Übergang zu
+// `.downloading` könnte nie mehr ankommen. `"missing"` ist der reale Anfangszustand vor jedem
+// Download (s. `SetupState`-Dokumentation) und bleibt — wie `"downloading"` — ein NICHT-
+// terminaler Zustand, unter dem die Achse weiterläuft.
 @MainActor
 @Test(.timeLimit(.minutes(1)))
 func setupAchseSpiegeltDenModelsBlock() async {
-    let client = StaticClient(.success(health("ready")))
+    let client = StaticClient(.success(healthMitModels(state: "missing")))
     let state = AppState(lifecycle: FakeLifecycle(.success(.spawned)), client: client,
                          permissions: FakePermissions(granted: true),
                          pollIntervalStarting: .milliseconds(10), pollIntervalReady: .milliseconds(10),
@@ -676,6 +684,67 @@ func setupAchseSpiegeltDenModelsBlock() async {
     }
     #expect(state.setup == .downloading(fraction: 0.5, downloadedBytes: 1950, totalBytes: 3900),
             "die setup-Achse übernimmt den models-Block unabhängig vom Engine-Poll")
+
+    await state.shutdown()
+}
+
+// Task 7 (Fix nach finalem Review Teil 2b, Punkt #2 — Effizienz-Minor): Die setup-Achse pollte
+// bisher für die GESAMTE App-Lebensdauer weiter, obwohl ihr Anliegen (den Erststart-Fortschritt
+// anzeigen) mit dem ersten `"ready"` endgültig erledigt ist — ein dritter Dauer-Poller neben
+// Engine- (5 s) und Rechte-Achse (2 s) für ein EINMALIGES Ereignis. Der Fix beendet die Achse
+// (`return` aus der Loop in `startSetupPolling()`), sobald ein `health()` mit
+// `models.state == "ready"` eintrifft.
+//
+// Deterministisch über `GatedClient` (zählt `totalCalls`, exakt das Muster aus
+// `doppelterStartUeberlagertKeinePollTasks()`): `BlockingLifecycle` hält `lifecycle.start()`
+// ABSICHTLICH für die gesamte Testdauer offen (`engineGate` wird nie freigegeben) — damit
+// AUSSCHLIESSLICH die setup-Achse den geteilten Client je anfasst. Ein Engine-Poll (der erst
+// NACH einem erfolgreichen `lifecycle.start()` beginnt, s. `AppState.start()`) käme sonst mit
+// eigenen `health()`-Aufrufen an denselben, `GatedClient`-blockierenden Client — und würde beim
+// `shutdown()` unten in einer Race gegen `stopPolling()`s `cancel()` hängen bleiben (dasselbe
+// Problem, das `doppelterStartUeberlagertKeinePollTasks()` sorgfältig über passgenaues
+// `release()` je Aufruf umschifft; hier ist es einfacher, den Engine-Poll erst gar nicht
+// entstehen zu lassen). `BlockingLifecycle.stop()` ist ein Leerbefehl — `state.shutdown()`
+// funktioniert unten also unabhängig davon, dass `lifecycle.start()` nie zurückkehrt; die
+// entsprechende `state.start()`-Task bleibt bewusst unbeobachtet (bewachte Ressourcen wie
+// `client`/`state` werden über `shutdown()` sauber freigegeben, die hängende Task verweist auf
+// nichts, was danach noch etwas anfasst).
+//
+// Der einzige jemals hinterlegte Wert ist bereits `"ready"`; nach dessen Freigabe darf KEIN
+// weiterer `health()`-Aufruf mehr eintreffen — weder sofort noch nach reichlich Gelegenheit dazu
+// (kooperative Yields statt fester Wartezeit, wie in `doppelterStartUeberlagertKeinePollTasks()`
+// begründet).
+//
+// Vor dem Fix: ROT — die Achse pollt endlos weiter; ein zweiter `health()`-Aufruf registriert
+// sich beim `GatedClient` (sichtbar an `totalCalls > 1`), sobald die Yield-Schleife ihm genug
+// Gelegenheit gibt. Nach dem Fix: GRÜN, `totalCalls` bleibt für immer bei 1.
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func setupAchseEndetNachReady() async {
+    let engineGate = AsyncGate()
+    let client = GatedClient(.success(healthMitModels(state: "ready")))
+    let state = AppState(lifecycle: BlockingLifecycle(gate: engineGate), client: client,
+                         permissions: FakePermissions(granted: true),
+                         pollIntervalStarting: .milliseconds(10), pollIntervalReady: .milliseconds(10),
+                         permissionsInterval: .seconds(3600), setupInterval: .milliseconds(1))
+
+    _ = Task { await state.start() }   // start() blockiert dauerhaft in lifecycle.start()
+
+    var iterator = client.started.makeAsyncIterator()
+    _ = await iterator.next()   // der erste (und einzige erwartete) setup-health()-Aufruf ist in Flug
+    client.release()            // liefert "ready" — die Achse soll danach für immer enden
+
+    // Reichlich Gelegenheit für einen (im Fehlerfall auftretenden) zweiten Aufruf, sich zu
+    // zeigen — bei korrektem Code ist die Achse längst per `return` beendet und kann
+    // strukturell keinen weiteren `health()`-Aufruf mehr absetzen. Bewusst KEIN
+    // `warteBisMitEchterZeit` auf `state.setup == .hidden`: `.hidden` ist bereits der
+    // Ausgangswert, ein solches Warten wäre trivial erfüllt und bewiese nichts.
+    for _ in 0 ..< 200 { await Task.yield() }
+
+    #expect(state.setup == .hidden, "\"ready\" zeigt kein Einrichtungs-Fenster")
+
+    #expect(client.totalCalls == 1,
+            "nach dem ersten \"ready\" darf die setup-Achse keinen weiteren health()-Aufruf mehr absetzen")
 
     await state.shutdown()
 }

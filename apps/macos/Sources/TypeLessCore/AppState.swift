@@ -253,6 +253,13 @@ public final class AppState {
                     // schwebender health()-Aufruf den frischen Wert der neuen Task (stale-write).
                     guard self.setupGeneration == generation else { return }
                     self.setup = SetupState(models: health.models)
+                    // Task 7 (Fix nach finalem Review Teil 2b, Effizienz-Minor): Der Erststart ist
+                    // ein EINMALIGES Anliegen — sobald die Modelle da sind, bleiben sie es (ein
+                    // erneuter Download beginnt nur über `restart()`, das die Achse mit einer
+                    // frischen `generation` ohnehin neu aufsetzt). Ohne dieses Ende wäre die
+                    // setup-Achse ein dritter Dauer-Poller neben Engine- (5 s) und Rechte-Achse
+                    // (2 s), für ein Ereignis, das nur einmal pro Programmlauf eintritt.
+                    if health.models.state == "ready" { return }  // Erststart abgeschlossen — Achse endet
                 }
             }
         }
