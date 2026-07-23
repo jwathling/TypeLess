@@ -17,6 +17,12 @@ CONFIG="${1:-debug}"
 APP="TypeLess.app"
 BUNDLE_ID="de.typeless.TypeLess"
 
+# Version aus EINER Quelle (Repo-Root/VERSION) — App-Info.plist, Zip-Name (release.sh) und
+# Appcast dürfen nie auseinanderlaufen. Das Anheben der Version ist ein bewusster Edit von VERSION.
+VERSION="$(tr -d ' \t\n\r' < "$SCRIPT_DIR/../VERSION")"
+[ -n "$VERSION" ] || { echo "FEHLER: VERSION-Datei leer oder fehlt ($SCRIPT_DIR/../VERSION)" >&2; exit 1; }
+echo "== Version aus VERSION-Datei: $VERSION =="
+
 echo "== swift build ($CONFIG) =="
 swift build -c "$CONFIG"
 BIN="$(swift build -c "$CONFIG" --show-bin-path)/TypeLess"
@@ -35,7 +41,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
     <key>CFBundleName</key><string>TypeLess</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.3.0</string>
+    <key>CFBundleShortVersionString</key><string>$VERSION</string>
+    <key>CFBundleVersion</key><string>$VERSION</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <!-- Kein Dock-Icon, kein Fenster: TypeLess ist ein Hintergrundwerkzeug. -->
     <key>LSUIElement</key><true/>
