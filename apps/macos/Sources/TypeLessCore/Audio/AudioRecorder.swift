@@ -86,6 +86,10 @@ public protocol AudioRecorder: Sendable {
     func start() async throws
     /// Beendet die Aufnahme und liefert die gesammelten Werte (s. ``AudioRecording``).
     func stop() async throws -> AudioRecording
+    /// Spitzenpegel (0…1) des zuletzt eingegangenen Audio-Puffers — für die Live-Anzeige während
+    /// der Aufnahme. `0`, wenn gerade nicht aufgenommen wird. Bewusst ein billiger Momentanwert:
+    /// Er wird im Echtzeit-Tap nur abgelegt (max. abs.), nicht gepuffert.
+    func aktuellerPegel() async -> Float
 }
 
 /// Die echte Aufnahme über ``AVAudioEngine``.
@@ -135,6 +139,7 @@ public actor AVAudioEngineRecorder: AudioRecorder {
         private let lock = NSLock()
         private var werte: [Float] = []
         private var haeppchenFehler = 0
+        private var letzterPeak: Float = 0
 
         func append(_ neue: [Float]) {
             lock.lock(); werte += neue; lock.unlock()
@@ -145,6 +150,19 @@ public actor AVAudioEngineRecorder: AudioRecorder {
         /// darf hierfür nichts Langsames tun (keine Allokation, kein String, kein Logging).
         func fehlerVermerken() {
             lock.lock(); haeppchenFehler += 1; lock.unlock()
+        }
+
+        /// Legt den Spitzenpegel des zuletzt umgerechneten Häppchens ab (max. Absolutwert).
+        /// Threadsicher wie `append`; der Echtzeit-Thread darf nichts Langsames tun — das ist eine
+        /// einzige Reduktion über den Puffer.
+        func peakSetzen(_ neue: [Float]) {
+            var p: Float = 0
+            for w in neue { let a = abs(w); if a > p { p = a } }
+            lock.lock(); letzterPeak = p; lock.unlock()
+        }
+
+        func peakLesen() -> Float {
+            lock.lock(); defer { lock.unlock() }; return letzterPeak
         }
 
         func leeren() -> (werte: [Float], haeppchenFehler: Int) {
@@ -251,6 +269,7 @@ public actor AVAudioEngineRecorder: AudioRecorder {
                 do {
                     let neue = try resampler.append(puffer)
                     sammler.append(neue)
+                    sammler.peakSetzen(neue)
                 } catch {
                     sammler.fehlerVermerken()
                 }
@@ -298,6 +317,7 @@ public actor AVAudioEngineRecorder: AudioRecorder {
         }
         guard zustand == .laeuft else { throw AudioRecorderError.notRecording }
         zustand = .gestoppt
+        sammler.peakSetzen([])
 
         // Reihenfolge ist hier sicherheitsrelevant (Review-Finding 2 zu Task 2): `AudioResampler`
         // ist dokumentiert nicht threadsicher — `append` oben läuft ausschließlich im seriellen
@@ -335,6 +355,11 @@ public actor AVAudioEngineRecorder: AudioRecorder {
 
         return AudioRecording(werte: ergebnis, verloreneHaeppchen: haeppchenFehler,
                               geraeteWechsel: geraeteWechsel)
+    }
+
+    public func aktuellerPegel() async -> Float {
+        guard zustand == .laeuft else { return 0 }
+        return sammler.peakLesen()
     }
 
     private static func mikrofonErlaubt() async -> Bool {

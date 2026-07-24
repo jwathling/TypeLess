@@ -122,6 +122,10 @@ final class GatedRecorder: AudioRecorder, @unchecked Sendable {
         return AudioRecording(werte: samples, verloreneHaeppchen: 0)
     }
 
+    /// Nicht Teil dieses Tests (die torgesteuerte Attrappe wird nicht für die Pegel-Probe
+    /// gebraucht) — liefert `0`, damit die Konformität zum Protokoll erhalten bleibt.
+    func aktuellerPegel() async -> Float { 0 }
+
     /// Löst genau einen wartenden `start()`-Aufruf auf. Bewusst nicht `async`: Der Test ruft ihn
     /// synchron auf, ohne selbst eine Task-Grenze zu queren.
     func freigeben() {
@@ -1657,6 +1661,97 @@ func overlayZeigtEingefuegtOhneText() async throws {
     await warteBis { coordinator.session == .idle }
 
     #expect(inserter.getippt == ["Guten Morgen."])
+    #expect(coordinator.overlay == .eingefuegt)
+
+    await coordinator.stop()
+}
+
+// MARK: - Diktat-Overlay Task 3: echter Live-Pegel (Recorder-Peak + Poll)
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func pegelLandetWaehrendDerAufnahmeImOverlay() async throws {
+    // Task 3: Der Recorder liefert während der Aufnahme einen festen Spitzenpegel
+    // (`aktuellerPegel() == 0.7`), der Coordinator pollt ihn (hier mit knappem `pegelIntervall`,
+    // damit der Test nicht auf die echten ~66 ms warten muss) und schreibt ihn ins Overlay. Da der
+    // Poll nebenläufig läuft, wird deterministisch über `warteBis` auf den ERSTEN Poll-Durchlauf
+    // gewartet statt auf ein festes `sleep`.
+    let hotkey = FakeHotkey()
+    let recorder = FakeRecorder(samples: sprache())
+    await recorder.setzePegel(0.7)
+    let pasteboard = SpyPasteboard()
+    let client = DictationClient(ergebnis: .success(ergebnis("x")))
+    let coordinator = DictationCoordinator(hotkey: hotkey, recorder: recorder, client: client,
+                                           pasteboard: pasteboard, inserter: SpyInserter(),
+                                           target: FakeTarget(),
+                                           keyDownCounter: FakeKeyDownCounter(),
+                                           pegelIntervall: .milliseconds(2))
+    await coordinator.start()
+
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+
+    await warteBis { coordinator.overlay == .hoertZu(pegel: 0.7) }
+
+    #expect(coordinator.overlay == .hoertZu(pegel: 0.7),
+            "der echte, von der Attrappe gelieferte Pegel muss im Overlay ankommen")
+
+    await coordinator.stop()
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func pegelPollFragtNachDerVerarbeitungNichtMehrBeimRecorderAn() async throws {
+    // Ergänzung (Umsetzer-Hinweis im Brief): Beim Übergang zu `.processing` muss `stoppePegelPoll()`
+    // greifen — der Poll darf nach dem Zuhören nicht weiterlaufen. Ein reiner Blick auf `overlay`
+    // würde das nicht beweisen: `startePegelPoll()` schreibt ohnehin NUR, solange `overlay` noch
+    // `.hoertZu` ist (der Guard im Poll selbst), also bliebe `overlay` bei `.verarbeitet`, selbst
+    // wenn `stoppePegelPoll()` fehlte — der Poll würde einfach weiter erfolglos anfragen, ohne
+    // etwas sichtbar falsch zu machen. Deshalb wird hier direkt gezählt, wie oft die Attrappe
+    // `aktuellerPegel()` gefragt wird (`FakeRecorder.pegelAbfragen`) — bliebe der Poll aktiv, stiege
+    // dieser Zähler auch nach `.processing` munter weiter (bei 2-ms-Intervall und 20 ms Wartezeit
+    // um rund zehn), mit dem Fix dagegen höchstens um den einen, zum Abbruchzeitpunkt schon
+    // in Flug befindlichen Aufruf (s. `startePegelPoll()`: die `Task.isCancelled`-Prüfung sitzt
+    // NACH dem `await self.recorder.aktuellerPegel()`, nicht davor).
+    let hotkey = FakeHotkey()
+    let recorder = FakeRecorder(samples: sprache())
+    await recorder.setzePegel(0.7)
+    let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter()
+    let target = FakeTarget()
+    let client = GatedDictationClient()
+    let coordinator = DictationCoordinator(hotkey: hotkey, recorder: recorder, client: client,
+                                           pasteboard: pasteboard, inserter: inserter,
+                                           target: target, keyDownCounter: FakeKeyDownCounter(),
+                                           pegelIntervall: .milliseconds(2))
+    await coordinator.start()
+
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    await warteBis { coordinator.overlay == .hoertZu(pegel: 0.7) }
+    hotkey.send(.released)
+
+    var iterator = client.processGestartet.makeAsyncIterator()
+    _ = await iterator.next()
+    await warteBis { coordinator.overlay == .verarbeitet }
+
+    let abfragenBeiProcessingStart = await recorder.pegelAbfragen
+    // Dem (mit dem Fix bereits gestoppten) Poll mehrere Intervalle Gelegenheit geben, sich
+    // fälschlich weiter zu melden.
+    try? await Task.sleep(for: .milliseconds(20))
+    let abfragenNachDerWartezeit = await recorder.pegelAbfragen
+
+    #expect(abfragenNachDerWartezeit <= abfragenBeiProcessingStart + 1,
+            """
+            der Pegel-Poll darf nach dem Übergang zu .processing höchstens noch einen bereits \
+            angestoßenen Aufruf zu Ende bringen, aber keine weiteren mehr starten — sonst liefe \
+            er nach dem Zuhören unbemerkt weiter
+            """)
+    #expect(coordinator.overlay == .verarbeitet)
+
+    client.freigeben(mit: .success(ergebnis("fertig")))
+    await warteBis { coordinator.overlay == .eingefuegt }
+
     #expect(coordinator.overlay == .eingefuegt)
 
     await coordinator.stop()
