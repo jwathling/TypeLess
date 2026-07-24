@@ -125,9 +125,12 @@ Boden weggezogen.
 
 **Diktieren (ab M4):** **Fn halten**, sprechen, **loslassen** — der bereinigte/verfeinerte Text
 landet in der **Zwischenablage** (⌘V zum Einfügen; automatisches Einfügen an der Cursorposition
-kommt erst in M5). Bewusste Entscheidung des Anwenders: **kein Overlay und keine Töne** — das
-Menüleisten-Symbol ist die einzige Rückmeldung. Voraussetzung: Systemeinstellungen → Tastatur →
-„Beim Drücken der 🌐-Taste“ → „Keine Aktion“ (steht das auf Emoji-Picker/Eingabequelle/
+kommt erst in M5). Bewusste Entscheidung des Anwenders: ein kleines Overlay unten mittig auf dem
+Bildschirm zeigt den Verlauf **nur während des Diktats** — Live-Pegel beim Zuhören, Verarbeitung,
+Ergebnis; eine Textvorschau erscheint dabei ausschließlich, wenn der Text in der Zwischenablage
+landet (nie beim direkten Einfügen — der Text steht ja schon im Feld). **Weiterhin keine Töne.**
+Das Menüleisten-Symbol bleibt als zusätzliche Rückmeldung. Voraussetzung: Systemeinstellungen →
+Tastatur → „Beim Drücken der 🌐-Taste“ → „Keine Aktion“ (steht das auf Emoji-Picker/Eingabequelle/
 Systemdiktat, poppt bei jedem Diktat der Emoji-Picker auf — die App weist im Menü darauf hin,
 ändert die Einstellung aber nicht selbst).
 

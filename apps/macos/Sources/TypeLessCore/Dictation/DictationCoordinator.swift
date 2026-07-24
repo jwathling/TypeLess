@@ -33,7 +33,7 @@ public enum SessionState: Sendable, Equatable {
 /// eingefügt — **oder** er liegt in der Zwischenablage. Ein drittes Ergebnis gibt es nicht
 /// (s. ``stelleZu(_:zielApp:zielFokus:target:inserter:pasteboard:)``).
 ///
-/// **Verbindlich (Entscheidung des Anwenders):** Es gibt kein Overlay und keine Tonsignale.
+/// **Verbindlich (Entscheidung des Anwenders):** kein Ton; ein Overlay zeigt den Verlauf.
 /// Deshalb bleibt bei **jedem** Fehlschlag die Zwischenablage unangetastet — dann liefert ⌘V
 /// wenigstens den alten Inhalt statt Leere. Und wurde direkt eingefügt, bleibt sie ebenfalls
 /// unangetastet: „Diktieren und Kopieren dürfen sich nicht gegenseitig stören."

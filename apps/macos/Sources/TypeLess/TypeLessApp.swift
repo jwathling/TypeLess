@@ -122,6 +122,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var dictation: DictationCoordinator?
 
     private var setupWindow: NSWindow?
+    private var overlayPanel: NSPanel?
+    private var overlayHosting: NSHostingController<OverlayView>?
 
     /// Beobachtet ``AppState/setup`` und öffnet/schließt das Einrichtungs-Fenster von einer
     /// IMMER aktiven Stelle aus (der Auslöser darf nicht im Fenster-Inhalt sitzen — SwiftUI wertet
@@ -159,6 +161,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Beobachtet ``DictationCoordinator/overlay`` von einer IMMER aktiven Stelle (nicht aus einer
+    /// Fenster-Szene — s. Begründung bei `beobachteSetup`). `withObservationTracking` feuert
+    /// einmalig, daher am Ende erneut registrieren.
+    private func beobachteOverlay() {
+        withObservationTracking {
+            _ = dictation?.overlay
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                self?.aktualisiereOverlay()
+                self?.beobachteOverlay()
+            }
+        }
+    }
+
+    @MainActor private func aktualisiereOverlay() {
+        guard let dictation else { return }
+        if case .aus = dictation.overlay {
+            overlayPanel?.orderOut(nil)
+            return
+        }
+        if overlayPanel == nil {
+            let hosting = NSHostingController(rootView: OverlayView(coordinator: dictation))
+            hosting.view.frame.size = hosting.view.fittingSize
+            let panel = macheOverlayPanel(inhalt: hosting.view)  // gibt ein PassivesPanel zurück
+            overlayHosting = hosting
+            overlayPanel = panel
+        }
+        guard let panel = overlayPanel, let hosting = overlayHosting else { return }
+        // Größe an den aktuellen Inhalt anpassen, unten mittig auf dem aktiven Bildschirm platzieren.
+        let groesse = hosting.view.fittingSize
+        panel.setContentSize(groesse)
+        if let screen = NSScreen.main {
+            let r = screen.visibleFrame
+            let x = r.midX - groesse.width / 2
+            let y = r.minY + 96
+            panel.setFrameOrigin(NSPoint(x: x, y: y))
+        }
+        panel.orderFront(nil)   // NICHT makeKey — der Fokus bleibt beim Zielfeld
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard let state, let dictation else { return }
 
@@ -169,6 +211,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // SwiftUI nicht auswertet, solange ihr Fenster geschlossen ist.
         aktualisiereSetupFenster()
         beobachteSetup()
+
+        // Diktat-Overlay (Task 5): genau wie das Einrichtungs-Fenster einmal sofort
+        // synchronisieren und danach über `beobachteOverlay()` auf jede weitere Änderung
+        // reagieren.
+        aktualisiereOverlay()
+        beobachteOverlay()
 
         // BEIDE in EIGENEN Tasks — nacheinander wäre ein Fehler: `state.start()` kehrt erst
         // zurück, wenn die Engine fertig aufgewärmt ist (~20 s, s. `SidecarLifecycle
