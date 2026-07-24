@@ -1756,3 +1756,93 @@ func pegelPollFragtNachDerVerarbeitungNichtMehrBeimRecorderAn() async throws {
 
     await coordinator.stop()
 }
+
+// MARK: - Diktat-Overlay Task 4: Auto-Ausblenden der Endzustände
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func eingefuegtBlendetNachDerDauerAus() async throws {
+    // Task 4: Nach "Eingefügt ✓" blendet das Overlay von selbst aus — hier mit knapper
+    // `dauerEingefuegt`, damit der Test nicht auf die echte 1 s warten muss.
+    let hotkey = FakeHotkey()
+    let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter()
+    let target = FakeTarget(app: 42, ziel: .beschreibbaresTextfeld)
+    let client = DictationClient(ergebnis: .success(ergebnis("Guten Morgen.")))
+    let coordinator = DictationCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
+                                           client: client, pasteboard: pasteboard,
+                                           inserter: inserter, target: target,
+                                           keyDownCounter: FakeKeyDownCounter(),
+                                           dauerEingefuegt: .milliseconds(20))
+    await coordinator.start()
+
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+    await warteBis { coordinator.overlay == .eingefuegt }
+
+    #expect(coordinator.overlay == .eingefuegt,
+            "direkt nach dem Einfügen zeigt das Overlay den Erfolg")
+
+    // `dauerEingefuegt` ist real (keine simulierte Uhr) — gewartet wird deshalb mit echter Zeit,
+    // gepollt statt fest verschlafen (gleiches Muster wie beim Aufnahme-Watchdog-Test).
+    await warteBisMitEchterZeit { coordinator.overlay == .aus }
+
+    #expect(coordinator.overlay == .aus,
+            "nach `dauerEingefuegt` muss das Overlay von selbst ausblenden")
+
+    await coordinator.stop()
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func neuesDiktatBrichtDenAusblendTimerAb() async throws {
+    // Task 4: Ein neues Diktat muss einen noch laufenden Ausblend-Timer eines VORHERIGEN
+    // Diktats abbrechen — sonst würde der alte Timer gleich darauf das frische Overlay des
+    // neuen Diktats wieder wegblenden. Erstes Diktat landet (App-Wechsel während der
+    // Verarbeitung, wie in `appWechselWaehrendDerVerarbeitungVerhindertDasTippen`) mit knapper
+    // `dauerZwischenablage` in der Zwischenablage; NOCH BEVOR dieser Timer abläuft, startet das
+    // zweite Diktat.
+    let hotkey = FakeHotkey()
+    let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter()
+    let target = FakeTarget(app: 42, ziel: .beschreibbaresTextfeld)
+    let dauerZwischenablage = Duration.milliseconds(20)
+    let client = DictationClient(ergebnis: .success(ergebnis("Erstes Diktat.")))
+    let coordinator = DictationCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
+                                           client: client, pasteboard: pasteboard,
+                                           inserter: inserter, target: target,
+                                           keyDownCounter: FakeKeyDownCounter(),
+                                           dauerZwischenablage: dauerZwischenablage)
+    await coordinator.start()
+
+    // Erstes Diktat: Der Anwender wechselt währenddessen die App → landet in der Zwischenablage
+    // und startet dort den (kurzen) Ausblend-Timer.
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    target.wechsleApp(zu: 99)
+    hotkey.send(.released)
+    await warteBis { coordinator.session == .inZwischenablage }
+    #expect(coordinator.overlay == .zwischenablage(vorschau: overlayVorschau("Erstes Diktat.")))
+
+    // SOFORT ein zweites Diktat starten — noch bevor `dauerZwischenablage` real abgelaufen ist.
+    hotkey.send(.pressed)
+    await warteBis { coordinator.overlay == .hoertZu(pegel: 0) }
+    #expect(coordinator.session == .recording)
+    #expect(coordinator.overlay == .hoertZu(pegel: 0),
+           "das neue Diktat muss das Overlay sofort auf 'hört zu' springen lassen")
+
+    // Länger als die (bereits abgebrochene) alte Dauer real warten: Der alte Timer darf das
+    // frische Overlay NICHT wegblenden. `warteBisMitEchterZeit` bricht früh ab, falls die
+    // Bedingung doch eintritt — dann wird die folgende Prüfung sichtbar rot statt den Test ewig
+    // hängen zu lassen (dieselbe Technik wie bei den Task-Abbruch-Proben dieser Datei, z. B.
+    // `wachhundBrichtEineNieLosgelasseneAufnahmeNachDerObergrenzeSelbsttaetigAb`).
+    await warteBisMitEchterZeit(obergrenze: .milliseconds(300)) {
+        coordinator.overlay == .aus
+    }
+
+    #expect(coordinator.overlay == .hoertZu(pegel: 0),
+           "der Ausblend-Timer des überholten Diktats darf das neue Overlay nicht wegblenden")
+
+    await coordinator.stop()
+}
