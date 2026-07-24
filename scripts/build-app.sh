@@ -117,11 +117,14 @@ else
 fi
 
 # Von innen nach außen: erst die verschachtelten Sparkle-Helfer, dann das Framework, zuletzt die App.
+# `Versions/Current` ist ein Symlink auf `Versions/B` — ohne `-L` steigt BSD-`find` NICHT in eine
+# Symlink-Suchwurzel ab und liefert null Treffer, die Schleife wäre ein stiller No-Op (die Helfer
+# blieben nur mit Sparkles mitgelieferter Ad-hoc-Signatur zurück, nicht mit „TypeLess Dev").
 FW="$APP/Contents/Frameworks/Sparkle.framework"
 if [ -d "$FW" ]; then
   while IFS= read -r -d '' nested; do
     codesign "${SIGN_ARGS[@]}" "$nested"
-  done < <(find "$FW/Versions/Current" \( -name '*.xpc' -o -name '*.app' -o -name 'Autoupdate' \) -print0)
+  done < <(find -L "$FW/Versions/Current" \( -name '*.xpc' -o -name '*.app' -o -name 'Autoupdate' \) -print0)
   codesign "${SIGN_ARGS[@]}" "$FW"
 fi
 codesign "${SIGN_ARGS[@]}" "$APP"
