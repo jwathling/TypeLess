@@ -31,4 +31,19 @@ struct OverlayVorschauTests {
     @Test func fuehrendeUndFolgendeLeerzeichenWerdenGetrimmt() {
         #expect(overlayVorschau("   Hallo Welt   ") == "Hallo Welt")
     }
+
+    @Test func wortgrenzeUnterDerHaelfteFuehrtZuHartemSchnittAnDerGrenze() {
+        // Randfall der Schwelle `space > grenze * 0.55`: Eine Wortgrenze, die (weit) UNTER der
+        // Hälfte der Grenze liegt, zählt NICHT — dann wird bewusst hart an der Grenze
+        // geschnitten, auch mitten in einem langen Wort, statt an der frühen Wortgrenze.
+        // Grenze 20 → Schwelle 11: Das Leerzeichen bei Index 2 ("hi ") liegt weit darunter, das
+        // folgende lange Wort hat keine weitere Wortgrenze vor der Grenze.
+        let text = "hi " + String(repeating: "b", count: 30)
+        let v = overlayVorschau(text, grenze: 20)
+        let erwarteterHarterSchnitt = "hi " + String(repeating: "b", count: 17)  // erste 20 Zeichen
+
+        #expect(v == erwarteterHarterSchnitt + " …",
+                "hart an der Grenze geschnitten, NICHT an der frühen Wortgrenze")
+        #expect(!v.hasPrefix("hi …"), "darf NICHT an der frühen Wortgrenze bei Index 2 abschneiden")
+    }
 }

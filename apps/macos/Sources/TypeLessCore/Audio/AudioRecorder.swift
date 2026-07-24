@@ -317,7 +317,6 @@ public actor AVAudioEngineRecorder: AudioRecorder {
         }
         guard zustand == .laeuft else { throw AudioRecorderError.notRecording }
         zustand = .gestoppt
-        sammler.peakSetzen([])
 
         // Reihenfolge ist hier sicherheitsrelevant (Review-Finding 2 zu Task 2): `AudioResampler`
         // ist dokumentiert nicht threadsicher — `append` oben läuft ausschließlich im seriellen

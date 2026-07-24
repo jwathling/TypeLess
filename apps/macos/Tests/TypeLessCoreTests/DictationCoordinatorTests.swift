@@ -1846,3 +1846,36 @@ func neuesDiktatBrichtDenAusblendTimerAb() async throws {
 
     await coordinator.stop()
 }
+
+// MARK: - Abschluss-Review Diktat-Overlay: jeder failed-Grund landet auch im Overlay
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func stilleSetztOverlayAufFehlerMitDemselbenTextWieSession() async throws {
+    // Die Spec verlangt als getestetes Verhalten: "jeder `failed`-Grund wird ins Overlay
+    // durchgereicht". Bisher prüfte kein Test `coordinator.overlay == .fehler(...)` — nur
+    // `session`. Hier am Stille-Pfad nachgeholt (derselbe Fehlerpfad wie
+    // `stilleMeldetMikrofonproblemUndLaesstDieZwischenablageInRuhe` oben), weil er ohne
+    // zusätzliche Attrappen auskommt und `handleReleased()` dort `session` UND `overlay` mit
+    // demselben Klartext setzt (s. dort: "Kein Ton aufgenommen — Mikrofon prüfen").
+    let hotkey = FakeHotkey()
+    let pasteboard = SpyPasteboard()
+    let client = DictationClient(ergebnis: .success(ergebnis("darf nicht kommen")))
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: stille()),
+                                      client: client, pasteboard: pasteboard)
+    await coordinator.start()
+
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+    await warteBis { if case .failed = coordinator.session { return true }; return false }
+
+    #expect(coordinator.session == .failed("Kein Ton aufgenommen — Mikrofon prüfen"))
+    #expect(coordinator.overlay == .fehler("Kein Ton aufgenommen — Mikrofon prüfen"),
+            """
+            die Spec verlangt: jeder failed-Grund wird ins Overlay durchgereicht — mit demselben \
+            Klartext wie session
+            """)
+
+    await coordinator.stop()
+}

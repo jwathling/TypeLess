@@ -256,6 +256,9 @@ public final class DictationCoordinator {
         // der App genauso schlimm (Finding 4, Review zu Task 4, Minor s. Kommentar dort).
         await warteAufVerarbeitungenMitZeitlimit()
         verarbeitungen.removeAll()
+        // Symmetrie zu `stoppePegelPoll()` oben: Ein noch laufender Ausblend-Timer eines
+        // Endzustands darf nach dem Beenden des Koordinators nicht mehr feuern.
+        ausblendTask?.cancel()
         session = .idle
         overlay = .aus
     }
