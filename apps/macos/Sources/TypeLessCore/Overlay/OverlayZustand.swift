@@ -7,7 +7,8 @@ import Foundation
 public enum OverlayZustand: Sendable, Equatable {
     /// Nichts sichtbar — das Overlay ist ausgeblendet.
     case aus
-    /// Aufnahme läuft; `pegel` (0…1, geglättet) treibt die Balken.
+    /// Aufnahme läuft; `pegel` (0…1) ist der ROHE Momentan-Spitzenpegel des Kerns, ungeglättet —
+    /// die Glättung (Balken-Animation) übernimmt die Anzeige, nicht der Kern.
     case hoertZu(pegel: Float)
     /// Die Engine verarbeitet (STT + LLM).
     case verarbeitet
