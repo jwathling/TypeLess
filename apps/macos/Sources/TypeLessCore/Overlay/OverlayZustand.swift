@@ -33,8 +33,12 @@ public func overlayVorschau(_ text: String, grenze: Int = 90) -> String {
     guard zeichen.count > grenze else { return getrimmt }
 
     var schnitt = grenze
-    // Letzte Wortgrenze (Leerzeichen) vor der Grenze — aber nur, wenn sie nicht ins erste knappe
-    // Drittel fällt (sonst bliebe von einem langen Wort zu wenig übrig; dann hart schneiden).
+    // Letzte Wortgrenze (Leerzeichen) vor der Grenze wird nur genutzt, wenn sie über der HÄLFTE
+    // der Grenze liegt (space > grenze * 0.55) — sonst bliebe von der Vorschau kaum noch etwas
+    // übrig. Bei einem langen Einzelwort/Kompositum ohne so eine späte Wortgrenze (z. B. eine
+    // URL oder ein zusammengesetztes Wort) wird deshalb bewusst HART an der Grenze geschnitten,
+    // mitten im Wort — ein bewusster Kompromiss: mehr Text zu zeigen ist wichtiger als ein
+    // früher Wortschnitt.
     if let space = zeichen[0..<grenze].lastIndex(of: " "),
        space > Int(Double(grenze) * 0.55) {
         schnitt = space
