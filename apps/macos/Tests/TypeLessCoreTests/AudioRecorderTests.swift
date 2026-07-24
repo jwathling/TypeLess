@@ -13,6 +13,13 @@ actor FakeRecorder: AudioRecorder {
     private(set) var laeuft = false
     private(set) var startCount = 0
     private(set) var stopCount = 0
+    /// Fester Pegel, den `aktuellerPegel()` zurückgibt, solange aufgenommen wird (Task 3,
+    /// Diktat-Overlay) — per `setzePegel(_:)` einstellbar, ohne echtes Audio zu brauchen.
+    private var pegel: Float = 0
+    /// Zählt die Aufrufe von `aktuellerPegel()` — belegt in Tests, dass der Pegel-Poll im
+    /// Koordinator TATSÄCHLICH aufgehört hat zu fragen (nicht nur, dass er nichts mehr ins
+    /// Overlay schreibt, was ein reiner Zustands-Guard schon allein sicherstellen würde).
+    private(set) var pegelAbfragen = 0
 
     init(samples: [Float] = [], verloreneHaeppchen: Int = 0, geraeteWechsel: Bool = false,
          fehlerBeimStart: AudioRecorderError? = nil) {
@@ -23,6 +30,9 @@ actor FakeRecorder: AudioRecorder {
     }
 
     func setSamples(_ neue: [Float]) { samples = neue }
+
+    /// Legt fest, was `aktuellerPegel()` liefert, solange die Attrappe `laeuft == true` ist.
+    func setzePegel(_ neuer: Float) { pegel = neuer }
 
     func start() async throws {
         startCount += 1
@@ -43,6 +53,11 @@ actor FakeRecorder: AudioRecorder {
         laeuft = false
         return AudioRecording(werte: samples, verloreneHaeppchen: verloreneHaeppchen,
                               geraeteWechsel: geraeteWechsel)
+    }
+
+    func aktuellerPegel() async -> Float {
+        pegelAbfragen += 1
+        return laeuft ? pegel : 0
     }
 }
 

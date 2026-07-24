@@ -127,6 +127,14 @@ public final class DictationCoordinator {
     /// Diktier-Taste).
     private var zaehlerBeimDruck: UInt32 = 0
 
+    /// Läuft, solange aufgenommen wird, und pollt ``AudioRecorder/aktuellerPegel()`` in
+    /// ``pegelIntervall``-Abständen, um ``overlay`` mit dem echten Live-Pegel zu treiben (Task 3,
+    /// Diktat-Overlay). `nil`, solange gerade nicht aufgenommen wird.
+    private var pegelTask: Task<Void, Never>?
+    /// ≈ 15 Hz per Default — schnell genug für flüssig wirkende Balken, ohne den Recorder-Actor
+    /// im Übermaß zu bemühen. Injizierbar, damit Tests nicht auf echte 66 ms warten müssen.
+    private let pegelIntervall: Duration
+
     public init(hotkey: HotkeyMonitor,
                 recorder: AudioRecorder,
                 client: SidecarClient,
@@ -137,7 +145,8 @@ public final class DictationCoordinator {
                 beendenZeitlimit: Duration = .seconds(10),
                 beendenPollIntervall: Duration = .milliseconds(20),
                 aufnahmeObergrenze: Duration = .seconds(120),
-                keyDownCounter: KeyDownCounter = SystemKeyDownCounter()) {
+                keyDownCounter: KeyDownCounter = SystemKeyDownCounter(),
+                pegelIntervall: Duration = .milliseconds(66)) {
         self.hotkey = hotkey
         self.recorder = recorder
         self.client = client
@@ -149,6 +158,7 @@ public final class DictationCoordinator {
         self.beendenPollIntervall = beendenPollIntervall
         self.aufnahmeObergrenze = aufnahmeObergrenze
         self.keyDownCounter = keyDownCounter
+        self.pegelIntervall = pegelIntervall
     }
 
     // MARK: - Lebenszyklus
@@ -220,6 +230,7 @@ public final class DictationCoordinator {
         // mehr, der ein Diktat entgegennehmen würde.
         if session == .recording {
             beendeAufnahmeWatchdog()
+            stoppePegelPoll()
             _ = try? await recorder.stop()
         }
 
@@ -277,9 +288,34 @@ public final class DictationCoordinator {
     /// abgebrochen, bevor er hier ankommt, sobald die Aufnahme regulär endet.
     private func aufnahmeWegenUeberschreitungAbbrechen() async {
         guard session == .recording else { return }
+        stoppePegelPoll()
         _ = try? await recorder.stop()
         session = .failed("Aufnahme abgebrochen — Taste nicht losgelassen?")
         overlay = .fehler("Aufnahme abgebrochen — Taste nicht losgelassen?")
+    }
+
+    // MARK: - Live-Pegel (Task 3, Diktat-Overlay)
+
+    /// Aktualisiert den Live-Pegel im Overlay, solange aufgenommen wird. Schreibt AUSSCHLIESSLICH,
+    /// wenn das Overlay noch `.hoertZu` ist — sonst hat die Verarbeitung schon übernommen, und ein
+    /// nachlaufender Poll dürfte sie nicht überschreiben (Prüfung + Schreiben unmittelbar auf dem
+    /// MainActor, ohne `await` dazwischen).
+    private func startePegelPoll() {
+        pegelTask?.cancel()
+        pegelTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                let pegel = await self.recorder.aktuellerPegel()
+                guard !Task.isCancelled else { return }
+                if case .hoertZu = self.overlay { self.overlay = .hoertZu(pegel: pegel) }
+                try? await Task.sleep(for: self.pegelIntervall)
+            }
+        }
+    }
+
+    private func stoppePegelPoll() {
+        pegelTask?.cancel()
+        pegelTask = nil
     }
 
     // MARK: - Tastendruck
@@ -308,6 +344,7 @@ public final class DictationCoordinator {
         // Diktat vor. Deshalb: eine verwaiste Aufnahme zuerst wegwerfen, dann sauber neu starten.
         if session == .recording {
             beendeAufnahmeWatchdog()
+            stoppePegelPoll()
             _ = try? await recorder.stop()
         }
 
@@ -349,13 +386,19 @@ public final class DictationCoordinator {
         Task { [client] in try? await client.preload() }
 
         session = .recording
-        overlay = .hoertZu(pegel: 0)   // echter Pegel kommt in Task 3
+        overlay = .hoertZu(pegel: 0)
+        startePegelPoll()
         starteAufnahmeWatchdog()
     }
 
     private func handleReleased() async {
         guard session == .recording else { return }
         beendeAufnahmeWatchdog()
+        // Ab hier wird die Aufnahme in JEDEM Fall verlassen — entweder in Richtung `.processing`
+        // (unten) oder in einen der Fehlerpfade weiter unten in dieser Funktion. Ein einziger Stopp
+        // hier deckt beide Fälle ab: Der Poll darf nach dem Zuhören unter keinen Umständen
+        // weiterlaufen (s. `startePegelPoll()`).
+        stoppePegelPoll()
 
         // I1 (Review M4, Important): Zählerstand beim Loslassen lesen, VOR `recorder.stop()` —
         // die Reihenfolge relativ zum `await` unten spielt keine Rolle (der Zähler zählt
