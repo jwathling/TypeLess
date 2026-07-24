@@ -42,6 +42,11 @@ public enum SessionState: Sendable, Equatable {
 public final class DictationCoordinator {
     public private(set) var session: SessionState = .idle
 
+    /// Was das Overlay gerade anzeigt (s. ``OverlayZustand``). Getrennt von ``session``: Das
+    /// Overlay zeigt den Live-Pegel und den erkannten Text, die der ``SessionState`` nicht trägt,
+    /// und einen kurzen „Eingefügt ✓"-Moment, den ``session`` zu `.idle` zusammenfasst.
+    public private(set) var overlay: OverlayZustand = .aus
+
     private let hotkey: HotkeyMonitor
     private let recorder: AudioRecorder
     private let client: SidecarClient
@@ -178,6 +183,7 @@ public final class DictationCoordinator {
             // ebenfalls nicht.
             guard let self, !Task.isCancelled else { return }
             self.session = .failed("Hotkey inaktiv — Eingabeüberwachung fehlt")
+            self.overlay = .fehler("Hotkey inaktiv — Eingabeüberwachung fehlt")
         }
     }
 
@@ -223,6 +229,7 @@ public final class DictationCoordinator {
         await warteAufVerarbeitungenMitZeitlimit()
         verarbeitungen.removeAll()
         session = .idle
+        overlay = .aus
     }
 
     private func stopHotkey() {
@@ -272,6 +279,7 @@ public final class DictationCoordinator {
         guard session == .recording else { return }
         _ = try? await recorder.stop()
         session = .failed("Aufnahme abgebrochen — Taste nicht losgelassen?")
+        overlay = .fehler("Aufnahme abgebrochen — Taste nicht losgelassen?")
     }
 
     // MARK: - Tastendruck
@@ -321,8 +329,10 @@ public final class DictationCoordinator {
             _ = try? await recorder.stop()
             if let fehler = error as? AudioRecorderError, fehler == .microphoneDenied {
                 session = .failed("Mikrofonzugriff verweigert")
+                overlay = .fehler("Mikrofonzugriff verweigert")
             } else {
                 session = .failed("Aufnahme nicht möglich: \(error)")
+                overlay = .fehler("Aufnahme nicht möglich: \(error)")
             }
             return
         }
@@ -339,6 +349,7 @@ public final class DictationCoordinator {
         Task { [client] in try? await client.preload() }
 
         session = .recording
+        overlay = .hoertZu(pegel: 0)   // echter Pegel kommt in Task 3
         starteAufnahmeWatchdog()
     }
 
@@ -357,6 +368,7 @@ public final class DictationCoordinator {
             recording = try await recorder.stop()
         } catch {
             session = .failed("Aufnahme fehlgeschlagen: \(error)")
+            overlay = .fehler("Aufnahme fehlgeschlagen: \(error)")
             return
         }
 
@@ -371,6 +383,7 @@ public final class DictationCoordinator {
         // Engine wird gar nicht erst bemüht.
         guard zaehlerBeimLoslassen == zaehlerBeimDruck else {
             session = .idle
+            overlay = .aus
             return
         }
 
@@ -379,6 +392,7 @@ public final class DictationCoordinator {
         // Versehentliches Antippen: kommentarlos verwerfen. Kein Fehler, keine Anzeige.
         guard samples.count >= minimumSampleCount else {
             session = .idle
+            overlay = .aus
             return
         }
 
@@ -389,6 +403,7 @@ public final class DictationCoordinator {
         // sondern wird als Fehlschlag gemeldet wie jeder andere auch.
         guard recording.verloreneHaeppchen == 0 else {
             session = .failed("Teile der Aufnahme gingen verloren — bitte erneut versuchen")
+            overlay = .fehler("Teile der Aufnahme gingen verloren — bitte erneut versuchen")
             return
         }
 
@@ -400,6 +415,7 @@ public final class DictationCoordinator {
         // schlecht, statt den Abbruch zu bemerken. Dieselbe Behandlung wie `verloreneHaeppchen`.
         guard !recording.geraeteWechsel else {
             session = .failed("Audiogerät hat gewechselt — bitte erneut versuchen")
+            overlay = .fehler("Audiogerät hat gewechselt — bitte erneut versuchen")
             return
         }
 
@@ -407,10 +423,12 @@ public final class DictationCoordinator {
         // Einfügen bemerkt — nach 30 Sekunden Sprechen in ein stummes Mikrofon.
         guard !SilenceDetector.isSilent(samples) else {
             session = .failed("Kein Ton aufgenommen — Mikrofon prüfen")
+            overlay = .fehler("Kein Ton aufgenommen — Mikrofon prüfen")
             return
         }
 
         session = .processing
+        overlay = .verarbeitet
         verarbeite(samples, zielApp: zielAppBeimDruck, zielFokus: fokusBeimDruck)
     }
 
@@ -419,7 +437,9 @@ public final class DictationCoordinator {
     /// Ergebnis einer Zustellung — was ist mit dem fertigen Text tatsächlich passiert?
     private enum Zustellung: Equatable {
         case eingefuegt
-        case inZwischenablage
+        /// Trägt den zugestellten Text mit — das Overlay zeigt davon eine gekürzte Vorschau
+        /// (s. ``beendeVerarbeitung(id:zustellung:)``), die der ``SessionState`` nicht kennt.
+        case inZwischenablage(text: String)
         /// Die Engine lieferte einen LEEREN Text (M1, Abschluss-Review M5): Der Anwender hat
         /// nichts Verständliches gesagt, oder das Mikrofon nahm nur Rauschen auf, aus dem das
         /// Stille-Gate nichts machen konnte. Es gibt nichts zuzustellen — aber es ist auch kein
@@ -513,7 +533,7 @@ public final class DictationCoordinator {
         // Bedingung 2: dieselbe App wie beim Fn-Druck.
         guard let zielApp, target.vordersteApp() == zielApp else {
             pasteboard.write(text)
-            return .inZwischenablage
+            return .inZwischenablage(text: text)
         }
 
         // Bedingungen 1, 3 und 4: Recht vorhanden, beschreibbares Textfeld, kein Passwortfeld.
@@ -529,7 +549,7 @@ public final class DictationCoordinator {
         // Sie deckt die bekannten Gründe fürs Verpuffen ab, nicht beweisbar alle: Pflicht, nicht Kür.
         guard target.fokusziel() == .beschreibbaresTextfeld else {
             pasteboard.write(text)
-            return .inZwischenablage
+            return .inZwischenablage(text: text)
         }
 
         // Bedingung 5 (Abschluss-Review M5): dasselbe TEXTFELD wie beim Fn-Druck.
@@ -555,7 +575,7 @@ public final class DictationCoordinator {
         // ist der ärgerlichere.
         guard let zielFokus, target.fokusKennung() == zielFokus else {
             pasteboard.write(text)
-            return .inZwischenablage
+            return .inZwischenablage(text: text)
         }
 
         do {
@@ -565,7 +585,7 @@ public final class DictationCoordinator {
         } catch {
             // Ein Diktat darf nie verloren gehen.
             pasteboard.write(text)
-            return .inZwischenablage
+            return .inZwischenablage(text: text)
         }
     }
 
@@ -589,10 +609,18 @@ public final class DictationCoordinator {
         guard id == juengsteVerarbeitung else { return }
         guard session == .processing else { return }
         switch zustellung {
-        case .eingefuegt: session = .idle
-        case .inZwischenablage: session = .inZwischenablage
-        case .nichtsErkannt: session = .failed("Nichts erkannt")
-        case let .fehler(grund): session = .failed(grund)
+        case .eingefuegt:
+            session = .idle
+            overlay = .eingefuegt
+        case let .inZwischenablage(text):
+            session = .inZwischenablage
+            overlay = .zwischenablage(vorschau: overlayVorschau(text))
+        case .nichtsErkannt:
+            session = .failed("Nichts erkannt")
+            overlay = .fehler("Nichts erkannt")
+        case let .fehler(grund):
+            session = .failed(grund)
+            overlay = .fehler(grund)
         }
     }
 

@@ -1562,3 +1562,102 @@ func leererTextAusDerEngineWirdGemeldetUndNichtAlsErfolgVerkauft() async throws 
 
     await coordinator.stop()
 }
+
+// MARK: - Diktat-Overlay Task 2: overlay wird an denselben Übergangsstellen wie session gesetzt
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func overlayZeigtVerarbeitetWaehrendDerVerarbeitung() async throws {
+    // Torgesteuerter Client (wie bei `aeltereVerarbeitungUeberschreibtNichtDenZustandDer...`):
+    // `process()` hängt, bis der Test ihn auflöst — nur so lässt sich der Zustand WÄHREND der
+    // Verarbeitung beobachten, statt dass er längst wieder verlassen ist.
+    let hotkey = FakeHotkey()
+    let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter()
+    let client = GatedDictationClient()
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
+                                      client: client, pasteboard: pasteboard, inserter: inserter)
+    await coordinator.start()
+
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+
+    // Sobald `process()` angelaufen ist, steht `session` bereits auf `.processing` — genau dort
+    // muss `overlay` auf `.verarbeitet` stehen.
+    var iterator = client.processGestartet.makeAsyncIterator()
+    _ = await iterator.next()
+    await warteBis { coordinator.overlay == .verarbeitet }
+
+    #expect(coordinator.session == .processing)
+    #expect(coordinator.overlay == .verarbeitet)
+
+    // Aufräumen: die hängende Verarbeitung auflösen, bevor der Koordinator beendet wird.
+    client.freigeben(mit: .success(ergebnis("fertig")))
+    await warteBis { coordinator.session == .idle }
+
+    await coordinator.stop()
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func overlayTraegtDieZwischenablageVorschau() async throws {
+    // Zielbedingungen nicht erfüllt (App gewechselt, wie in
+    // `appWechselWaehrendDerVerarbeitungVerhindertDasTippen`) — der Text landet in der
+    // Zwischenablage, und das Overlay muss ihn (gekürzt) tragen.
+    let hotkey = FakeHotkey()
+    let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter()
+    let target = FakeTarget(app: 42, ziel: .beschreibbaresTextfeld)
+    let text = """
+    Dies ist ein bewusst sehr langer Diktattext, der die neunzig Zeichen lange Grenze der \
+    Overlay-Vorschau eindeutig überschreitet, damit die Kürzung im Overlay wirklich geprüft wird.
+    """
+    let client = DictationClient(ergebnis: .success(ergebnis(text)))
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
+                                      client: client, pasteboard: pasteboard,
+                                      inserter: inserter, target: target)
+    await coordinator.start()
+
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    // Der Anwender klickt woanders hin, WÄHREND verarbeitet wird — dieselbe Vorgabe wie im
+    // bestehenden Zustellungs-Test.
+    target.wechsleApp(zu: 99)
+    hotkey.send(.released)
+    await warteBis { coordinator.session == .inZwischenablage }
+
+    #expect(inserter.getippt.isEmpty)
+    #expect(pasteboard.geschrieben == [text])
+    #expect(coordinator.overlay == .zwischenablage(vorschau: overlayVorschau(text)),
+            "das Overlay muss dieselbe gekürzte Vorschau tragen wie der zugestellte Text")
+
+    await coordinator.stop()
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func overlayZeigtEingefuegtOhneText() async throws {
+    // Normalfall: dieselbe App, beschreibbares Textfeld — der Text wird direkt eingefügt, und
+    // das Overlay zeigt NUR den Erfolg, ohne den Text selbst zu tragen (der steht ja schon im
+    // Feld).
+    let hotkey = FakeHotkey()
+    let pasteboard = SpyPasteboard()
+    let inserter = SpyInserter()
+    let target = FakeTarget(app: 42, ziel: .beschreibbaresTextfeld)
+    let client = DictationClient(ergebnis: .success(ergebnis("Guten Morgen.")))
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
+                                      client: client, pasteboard: pasteboard,
+                                      inserter: inserter, target: target)
+    await coordinator.start()
+
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+    await warteBis { coordinator.session == .idle }
+
+    #expect(inserter.getippt == ["Guten Morgen."])
+    #expect(coordinator.overlay == .eingefuegt)
+
+    await coordinator.stop()
+}
