@@ -135,6 +135,16 @@ public final class DictationCoordinator {
     /// im Übermaß zu bemühen. Injizierbar, damit Tests nicht auf echte 66 ms warten müssen.
     private let pegelIntervall: Duration
 
+    /// Blendet einen gesetzten Endzustand (Task 4, Diktat-Overlay) nach der passenden Dauer
+    /// wieder aus — s. `blendeAusNach(_:)`. `nil`, solange kein Ausblenden anliegt.
+    private var ausblendTask: Task<Void, Never>?
+    /// „Eingefügt ✓" — kurz, weil der Text ja schon sichtbar im Zielfeld steht.
+    private let dauerEingefuegt: Duration
+    /// Zwischenablage — länger, damit die Textvorschau lesbar bleibt.
+    private let dauerZwischenablage: Duration
+    /// Fehler — dazwischen: lang genug zum Lesen, kurz genug, um nicht zu nerven.
+    private let dauerFehler: Duration
+
     public init(hotkey: HotkeyMonitor,
                 recorder: AudioRecorder,
                 client: SidecarClient,
@@ -146,7 +156,10 @@ public final class DictationCoordinator {
                 beendenPollIntervall: Duration = .milliseconds(20),
                 aufnahmeObergrenze: Duration = .seconds(120),
                 keyDownCounter: KeyDownCounter = SystemKeyDownCounter(),
-                pegelIntervall: Duration = .milliseconds(66)) {
+                pegelIntervall: Duration = .milliseconds(66),
+                dauerEingefuegt: Duration = .seconds(1),
+                dauerZwischenablage: Duration = .seconds(4),
+                dauerFehler: Duration = .milliseconds(2500)) {
         self.hotkey = hotkey
         self.recorder = recorder
         self.client = client
@@ -159,6 +172,9 @@ public final class DictationCoordinator {
         self.aufnahmeObergrenze = aufnahmeObergrenze
         self.keyDownCounter = keyDownCounter
         self.pegelIntervall = pegelIntervall
+        self.dauerEingefuegt = dauerEingefuegt
+        self.dauerZwischenablage = dauerZwischenablage
+        self.dauerFehler = dauerFehler
     }
 
     // MARK: - Lebenszyklus
@@ -194,6 +210,7 @@ public final class DictationCoordinator {
             guard let self, !Task.isCancelled else { return }
             self.session = .failed("Hotkey inaktiv — Eingabeüberwachung fehlt")
             self.overlay = .fehler("Hotkey inaktiv — Eingabeüberwachung fehlt")
+            self.blendeAusNach(self.dauerFehler)
         }
     }
 
@@ -292,6 +309,7 @@ public final class DictationCoordinator {
         _ = try? await recorder.stop()
         session = .failed("Aufnahme abgebrochen — Taste nicht losgelassen?")
         overlay = .fehler("Aufnahme abgebrochen — Taste nicht losgelassen?")
+        blendeAusNach(dauerFehler)
     }
 
     // MARK: - Live-Pegel (Task 3, Diktat-Overlay)
@@ -316,6 +334,20 @@ public final class DictationCoordinator {
     private func stoppePegelPoll() {
         pegelTask?.cancel()
         pegelTask = nil
+    }
+
+    // MARK: - Auto-Ausblenden der Endzustände (Task 4, Diktat-Overlay)
+
+    /// Blendet das Overlay nach `dauer` aus — es sei denn, bis dahin hat ein neues Diktat den
+    /// Zustand verändert (dann wurde dieser Task abgebrochen). Ein neues Diktat ruft beim Start
+    /// `ausblendTask?.cancel()`.
+    private func blendeAusNach(_ dauer: Duration) {
+        ausblendTask?.cancel()
+        ausblendTask = Task { [weak self] in
+            try? await Task.sleep(for: dauer)
+            guard let self, !Task.isCancelled else { return }
+            self.overlay = .aus
+        }
     }
 
     // MARK: - Tastendruck
@@ -371,6 +403,7 @@ public final class DictationCoordinator {
                 session = .failed("Aufnahme nicht möglich: \(error)")
                 overlay = .fehler("Aufnahme nicht möglich: \(error)")
             }
+            blendeAusNach(dauerFehler)
             return
         }
 
@@ -386,6 +419,10 @@ public final class DictationCoordinator {
         Task { [client] in try? await client.preload() }
 
         session = .recording
+        // Task 4 (Diktat-Overlay): Ein neues Diktat räumt einen noch laufenden Ausblend-Timer
+        // eines VORHERIGEN Diktats sofort weg — sonst würde der alte Timer gleich darauf dieses
+        // frische Overlay wieder auf `.aus` ziehen.
+        ausblendTask?.cancel()
         overlay = .hoertZu(pegel: 0)
         startePegelPoll()
         starteAufnahmeWatchdog()
@@ -412,6 +449,7 @@ public final class DictationCoordinator {
         } catch {
             session = .failed("Aufnahme fehlgeschlagen: \(error)")
             overlay = .fehler("Aufnahme fehlgeschlagen: \(error)")
+            blendeAusNach(dauerFehler)
             return
         }
 
@@ -447,6 +485,7 @@ public final class DictationCoordinator {
         guard recording.verloreneHaeppchen == 0 else {
             session = .failed("Teile der Aufnahme gingen verloren — bitte erneut versuchen")
             overlay = .fehler("Teile der Aufnahme gingen verloren — bitte erneut versuchen")
+            blendeAusNach(dauerFehler)
             return
         }
 
@@ -459,6 +498,7 @@ public final class DictationCoordinator {
         guard !recording.geraeteWechsel else {
             session = .failed("Audiogerät hat gewechselt — bitte erneut versuchen")
             overlay = .fehler("Audiogerät hat gewechselt — bitte erneut versuchen")
+            blendeAusNach(dauerFehler)
             return
         }
 
@@ -467,6 +507,7 @@ public final class DictationCoordinator {
         guard !SilenceDetector.isSilent(samples) else {
             session = .failed("Kein Ton aufgenommen — Mikrofon prüfen")
             overlay = .fehler("Kein Ton aufgenommen — Mikrofon prüfen")
+            blendeAusNach(dauerFehler)
             return
         }
 
@@ -655,15 +696,19 @@ public final class DictationCoordinator {
         case .eingefuegt:
             session = .idle
             overlay = .eingefuegt
+            blendeAusNach(dauerEingefuegt)
         case let .inZwischenablage(text):
             session = .inZwischenablage
             overlay = .zwischenablage(vorschau: overlayVorschau(text))
+            blendeAusNach(dauerZwischenablage)
         case .nichtsErkannt:
             session = .failed("Nichts erkannt")
             overlay = .fehler("Nichts erkannt")
+            blendeAusNach(dauerFehler)
         case let .fehler(grund):
             session = .failed(grund)
             overlay = .fehler(grund)
+            blendeAusNach(dauerFehler)
         }
     }
 
