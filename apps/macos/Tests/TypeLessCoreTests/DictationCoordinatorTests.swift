@@ -254,6 +254,7 @@ final class FakeTarget: InsertionTarget, @unchecked Sendable {
     /// muss ohne Fenster und ohne erteilte Rechte prüfbar bleiben. Ein Protokoll, das rohe
     /// `AXUIElement` durchreichte, machte diese Attrappe unmöglich.
     private var feld: UInt64?
+    private(set) var gewecktePid: pid_t?
 
     init(app: pid_t? = 42, ziel: Fokusziel = .beschreibbaresTextfeld, feld: UInt64? = 1) {
         self.app = app
@@ -274,6 +275,7 @@ final class FakeTarget: InsertionTarget, @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         return feld.map { Fokuskennung.fuerTest($0) }
     }
+    func weckeBedienungshilfen(fuer pid: pid_t) { lock.lock(); gewecktePid = pid; lock.unlock() }
 }
 
 /// Schreibt nur mit, was getippt WORDEN WÄRE — im Test erscheint nirgends echter Text (M5).
@@ -1876,6 +1878,31 @@ func stilleSetztOverlayAufFehlerMitDemselbenTextWieSession() async throws {
             die Spec verlangt: jeder failed-Grund wird ins Overlay durchgereicht — mit demselben \
             Klartext wie session
             """)
+
+    await coordinator.stop()
+}
+
+// MARK: - Electron-Einfügen Task 1: Weck-Schnittstelle beim Fn-Druck
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func fnDruckWecktDieVordersteApp() async {
+    // Electron-/Chromium-Apps bauen ihren Bedienungshilfen-Baum erst auf Anforderung auf — sonst
+    // sieht die Zustellung kein Feld und weicht auf die Zwischenablage aus (s. Design-Dokument).
+    // Der Coordinator muss deshalb beim Fn-DRUCK die zu diesem Zeitpunkt vorderste App wecken,
+    // bevor er sich ihre PID für die spätere Zustellungsprüfung merkt.
+    let hotkey = FakeHotkey()
+    let target = FakeTarget(app: 4242, ziel: .beschreibbaresTextfeld)
+    let client = DictationClient(ergebnis: .success(ergebnis("Text.")))
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
+                                      client: client, pasteboard: SpyPasteboard(), target: target)
+    await coordinator.start()
+
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+
+    #expect(target.gewecktePid == 4242,
+            "die zum Zeitpunkt des Fn-Drucks vorderste App muss geweckt werden")
 
     await coordinator.stop()
 }

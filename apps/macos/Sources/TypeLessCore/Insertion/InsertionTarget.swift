@@ -115,6 +115,11 @@ public protocol InsertionTarget: Sendable {
     /// **Datenschutz:** Liefert ausschließlich die vergleichbare Identität (``Fokuskennung``),
     /// niemals den Inhalt des Feldes.
     func fokusKennung() -> Fokuskennung?
+
+    /// Fordert die App mit dieser Prozesskennung auf, ihren Bedienungshilfen-Baum zu aktivieren
+    /// (Electron/Chromium bauen ihn erst auf Anforderung auf — s. Design). **Setzt nur** ein
+    /// Attribut, liest nichts. Für native Apps folgenlos.
+    func weckeBedienungshilfen(fuer pid: pid_t)
 }
 
 /// Die echte Umsetzung über die Bedienungshilfen-Schnittstelle (AX).
@@ -235,6 +240,17 @@ public struct AXInsertionTarget: InsertionTarget {
         guard istVertrauenswuerdig() else { return nil }
         guard let ax = fokussiertesElement() else { return nil }
         return Fokuskennung(ax: ax)
+    }
+
+    public func weckeBedienungshilfen(fuer pid: pid_t) {
+        // Electron/Chromium bauen ihren AX-Baum erst, wenn eine assistive Technologie ihn
+        // anfordert — genau dafür ist `AXManualAccessibility` da. Bei nativen Apps ist das Setzen
+        // wirkungslos (unbekanntes Attribut). Ein Fehlschlag (fehlende Rechte, App weg) ist
+        // folgenlos: dann bleibt es beim Zwischenablage-Fallback wie bisher.
+        // **Datenschutz:** setzt nur, liest nichts. Bewusst NICHT `AXEnhancedUserInterface`
+        // (löst bei manchen Apps Layout-Wechsel aus).
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
     }
 
     /// Der AX-Knoten mit dem Tastaturfokus — die gemeinsame Wurzel von ``fokusziel()`` und

@@ -365,7 +365,13 @@ public final class DictationCoordinator {
         // dort, wo der Anwender diktieren will. Beim Zustellen (in ~6 s) wird gegen BEIDES geprüft:
         // Die App allein unterscheidet nicht zwischen dem Textfeld einer Seite und der Adressleiste
         // desselben Browsers (s. `fokusBeimDruck`).
-        zielAppBeimDruck = target.vordersteApp()
+        // Electron-/Chromium-Apps bauen ihren AX-Baum erst auf Anforderung auf — sonst sieht die
+        // Zustellung kein Feld und weicht auf die Zwischenablage aus. Die vorderste App JETZT
+        // wecken (der App-Wechsel-Beobachter, s. BedienungshilfenAufwecker, tut das i. d. R. schon
+        // vorher; dies deckt den Fall ab, dass die App beim TypeLess-Start bereits vorne war).
+        let vorne = target.vordersteApp()
+        if let vorne { target.weckeBedienungshilfen(fuer: vorne) }
+        zielAppBeimDruck = vorne
         fokusBeimDruck = target.fokusKennung()
 
         // C1 (Review M4, Critical): Verliert der Koordinator ein `.released` (macOS schaltet den
