@@ -124,6 +124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var setupWindow: NSWindow?
     private var overlayPanel: NSPanel?
     private var overlayHosting: NSHostingController<OverlayView>?
+    private var aufwecker: BedienungshilfenAufwecker?
 
     /// Beobachtet ``AppState/setup`` und öffnet/schließt das Einrichtungs-Fenster von einer
     /// IMMER aktiven Stelle aus (der Auslöser darf nicht im Fenster-Inhalt sitzen — SwiftUI wertet
@@ -241,6 +242,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Bedienungshilfen postet `CGEvent.post` klaglos ins Leere — der Text erschiene einfach
         // nicht. Anfordern, nicht nur prüfen.
         state.requestAccessibility()
+
+        // Primärer Weck-Weg (Electron-Einfügen, Task 2): weckt den Bedienungshilfen-Baum jeder
+        // App, zu der der Anwender wechselt, noch bevor Fn gedrückt wird — s.
+        // `BedienungshilfenAufwecker`. Eigenes, zustandsloses `AXInsertionTarget()`.
+        let aufwecker = BedienungshilfenAufwecker(target: AXInsertionTarget())
+        aufwecker.starte()
+        self.aufwecker = aufwecker
 
         Task { await state.start() }
         Task { await dictation.start() }
