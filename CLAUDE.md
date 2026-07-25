@@ -213,6 +213,18 @@ Systemdiktat, poppt bei jedem Diktat der Emoji-Picker auf — die App weist im M
   Zwischenablage unangetastet). Bekannte, in der Spec benannte Grenzen: Passwortfeld ohne
   AX-Subrolle; App, die ihre AX-Elemente während der Verarbeitung neu baut → gelegentlich unnötig
   Zwischenablage.
+- [x] **M5-Nachbesserung — direktes Einfügen in Electron-/Chromium-Apps** (Claude, Slack, VS Code, …).
+  Solche Apps bauen ihren Bedienungshilfen-Baum erst **auf Anforderung** auf — ohne den fand TypeLess
+  dort kein Textfeld und wich auf die Zwischenablage aus (per Diagnose belegt: `kAXFocusedUIElementAttribute`
+  liefert nichts). `AXInsertionTarget.weckeBedienungshilfen(fuer:)` setzt `AXManualAccessibility` auf dem
+  App-Element (**nur setzen, liest nichts**; bewusst **nicht** `AXEnhancedUserInterface` — löst bei manchen
+  Apps Layout-Wechsel aus). `Insertion/BedienungshilfenAufwecker` weckt jede App **beim Wechsel**
+  (`NSWorkspace.didActivateApplication`, damit der Baum vor dem Fn-Druck steht); zusätzlich weckt der
+  `DictationCoordinator` beim Fn-Druck die vorderste App (Absicherung). Die **fünf M5-Bedingungen und
+  `stelleZu` bleiben unverändert** — der Fix macht die AX-Abfragen bei Electron nur überhaupt wirksam.
+  **Erweiterte, bewusst akzeptierte Grenze:** In Electron-Apps kann ein Passwortfeld ohne
+  `AXSecureTextField`-Subrolle nicht als solches erkannt werden → dann würde direkt hineingetippt (Schließen
+  ginge nur durch Lesen des Feldinhalts, was das Datenschutz-Versprechen ausschließt).
 - [x] **M8-Teil vorgezogen — Prompt-Prefix-Cache** (LLM-Latenz). Der `MLXRefiner` cacht den
   festen 424-Token-Systemprompt **einmal** beim `preload()` und generiert pro Diktat nur den
   kurzen Suffix (Diktattext) gegen diesen KV-Cache; danach wird der Cache auf die Präfixlänge
