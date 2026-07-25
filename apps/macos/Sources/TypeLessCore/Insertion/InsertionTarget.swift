@@ -197,35 +197,59 @@ public struct AXInsertionTarget: InsertionTarget {
 
         guard let ax = fokussiertesElement() else { return .keinTextfeld }
 
+        // Rolle, Subrolle und Setzbarkeit AUSLESEN — ausschließlich Metadaten, **nie** den Inhalt
+        // (`kAXValueAttribute` wird nur auf Setzbarkeit geprüft, nicht kopiert). Die eigentliche
+        // Entscheidung trifft die reine, ohne AX prüfbare ``klassifiziere(rolle:subrolle:setzbar:)``.
+        // Schlägt eine Abfrage fehl, bleibt der jeweilige Wert leer/`false` — was `klassifiziere`
+        // konservativ als `.keinTextfeld` behandelt (kein fehlender Fall führt je ins Tippen).
         var rolle: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(ax, kAXRoleAttribute as CFString, &rolle) == .success,
-              let rollenName = rolle as? String
-        else { return .keinTextfeld }
-
-        // Passwortfelder zuerst — in sie wird unter keinen Umständen getippt. Die AX-Schnittstelle
-        // kennt dafür KEINE eigene Rolle (`kAXSecureTextFieldRole` existiert nicht — geprüft gegen
-        // AXRoleConstants.h): Ein Passwortfeld meldet sich als ganz normales `kAXTextFieldRole` und
-        // unterscheidet sich nur über die SUBROLLE `kAXSecureTextFieldSubrole`. Deshalb hier
-        // zusätzlich abfragen, bevor überhaupt auf Textrollen geprüft wird.
+        AXUIElementCopyAttributeValue(ax, kAXRoleAttribute as CFString, &rolle)
         var subrolle: CFTypeRef?
-        if AXUIElementCopyAttributeValue(ax, kAXSubroleAttribute as CFString, &subrolle) == .success,
-           let subrollenName = subrolle as? String,
-           subrollenName == (kAXSecureTextFieldSubrole as String) {
-            return .passwortfeld
-        }
+        AXUIElementCopyAttributeValue(ax, kAXSubroleAttribute as CFString, &subrolle)
+        var setzbar: DarwinBoolean = false
+        AXUIElementIsAttributeSettable(ax, kAXValueAttribute as CFString, &setzbar)
+
+        return Self.klassifiziere(rolle: rolle as? String,
+                                  subrolle: subrolle as? String,
+                                  setzbar: setzbar.boolValue)
+    }
+
+    /// Entscheidet allein aus den AX-Metadaten eines fokussierten Elements, ob dorthin getippt
+    /// werden darf. **Reine Funktion, ohne jede AX-Abfrage** — damit die Sicherheitsregeln (welche
+    /// Feldtypen beschreibbar sind, dass die Passwort-Subrolle alles schlägt, dass ein nicht
+    /// setzbares Feld abgelehnt wird) ohne echtes Fenster und ohne erteilte Rechte prüfbar sind.
+    ///
+    /// **Datenschutz:** Nimmt ausschließlich Rolle, Subrolle und Setzbarkeit entgegen — nie den
+    /// Inhalt des Feldes.
+    static func klassifiziere(rolle: String?, subrolle: String?, setzbar: Bool) -> Fokusziel {
+        // Ohne Rolle ist nichts entscheidbar — die sichere Antwort ist „kein Textfeld".
+        guard let rolle else { return .keinTextfeld }
+
+        // Passwortfelder zuerst — in sie wird unter keinen Umständen getippt, egal welche Rolle sie
+        // sonst tragen. Die AX-Schnittstelle kennt dafür KEINE eigene Rolle
+        // (`kAXSecureTextFieldRole` existiert nicht — geprüft gegen AXRoleConstants.h): Ein
+        // Passwortfeld meldet sich als ganz normales `kAXTextFieldRole` und unterscheidet sich nur
+        // über die SUBROLLE `kAXSecureTextFieldSubrole`. Deshalb hier zuerst, vor jeder Textrolle.
+        if subrolle == (kAXSecureTextFieldSubrole as String) { return .passwortfeld }
 
         let textRollen: Set<String> = [
             kAXTextFieldRole as String,
             kAXTextAreaRole as String,
             kAXComboBoxRole as String,
+            // WebKit-basierte editierbare Bereiche melden sich als `AXWebArea` — u. a. der
+            // Nachrichtenrumpf von Apple Mail (WebKit-Editor für Formatierung/Bilder) sowie Webmail
+            // und andere Rich-Text-Editoren auf WebKit-Basis. Für diese Rolle gibt es keine
+            // offizielle Konstante; der Name ist der von WebKit vergebene String. Zugelassen NUR
+            // zusammen mit der Setzbarkeitsprüfung unten: Eine reine Anzeige-Webseite (etwa in
+            // Safari) meldet `kAXValue` nicht als setzbar und fällt damit heraus — es wird also nie
+            // versucht, in eine nicht editierbare Seite zu tippen.
+            "AXWebArea",
         ]
-        guard textRollen.contains(rollenName) else { return .keinTextfeld }
+        guard textRollen.contains(rolle) else { return .keinTextfeld }
 
-        // Rolle allein reicht nicht: Ein Textfeld kann schreibgeschützt sein (Anzeige-Feld).
-        var setzbar: DarwinBoolean = false
-        guard AXUIElementIsAttributeSettable(ax, kAXValueAttribute as CFString, &setzbar) == .success,
-              setzbar.boolValue
-        else { return .keinTextfeld }
+        // Rolle allein reicht nicht: Ein Textfeld kann schreibgeschützt sein (Anzeige-Feld), und
+        // ein `AXWebArea` ist nur dann ein Ziel, wenn er editierbar ist.
+        guard setzbar else { return .keinTextfeld }
 
         return .beschreibbaresTextfeld
     }
