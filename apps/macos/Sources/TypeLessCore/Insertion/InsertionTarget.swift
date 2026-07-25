@@ -250,6 +250,12 @@ public struct AXInsertionTarget: InsertionTarget {
         // **Datenschutz:** setzt nur, liest nichts. Bewusst NICHT `AXEnhancedUserInterface`
         // (löst bei manchen Apps Layout-Wechsel aus).
         let app = AXUIElementCreateApplication(pid)
+        // Härtung (finaler Review): AXUIElementSetAttributeValue ist ein synchroner XPC-Ruf zur
+        // Zielapp. Ohne Begrenzung blockierte eine hängende App den MainActor bis zum AX-Default-
+        // Timeout (~6 s) — beim Fn-Druck den Aufnahmestart, beim App-Wechsel Menü/Hotkey. Ein kurzer
+        // Messaging-Timeout deckelt das hart; ein Timeout ist folgenlos (dann bleibt es beim
+        // Zwischenablage-Fallback wie bisher).
+        AXUIElementSetMessagingTimeout(app, 0.5)
         AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
     }
 
