@@ -225,6 +225,21 @@ Systemdiktat, poppt bei jedem Diktat der Emoji-Picker auf — die App weist im M
   **Erweiterte, bewusst akzeptierte Grenze:** In Electron-Apps kann ein Passwortfeld ohne
   `AXSecureTextField`-Subrolle nicht als solches erkannt werden → dann würde direkt hineingetippt (Schließen
   ginge nur durch Lesen des Feldinhalts, was das Datenschutz-Versprechen ausschließt).
+- [x] **M5-Nachbesserung — direktes Einfügen in WebKit-Editoren** (Apple Mail-Nachrichtenrumpf, Webmail,
+  Rich-Text-Editoren). Solche Felder melden sich über die Bedienungshilfen als **`AXWebArea`** (WebKit-Editor
+  für Formatierung/Bilder), nicht als klassisches `AXTextField`/`AXTextArea` — sie standen darum nicht auf
+  der Whitelist erlaubter Feldtypen und wichen auf die Zwischenablage aus (per Diagnose belegt: `rolle=AXWebArea
+  settable=true`, trotzdem abgelehnt). Fix: Die reine Rollen-Logik ist aus `AXInsertionTarget.fokusziel()` in
+  die AX-freie, testbare `AXInsertionTarget.klassifiziere(rolle:subrolle:setzbar:)` gezogen; sie lässt
+  `AXWebArea` **nur zusammen mit `settable=true`** zu — eine reine Anzeige-Webseite (Safari) meldet `kAXValue`
+  nicht als setzbar und fällt heraus, es wird also nie in eine nicht editierbare Seite getippt. Die **fünf
+  M5-Bedingungen bleiben unverändert** (gleiche App, gleiches Feld, kein Passwortfeld, kein blind tippen); der
+  Fix erweitert nur die Liste beschreibbarer Feldtypen. Damit kommt auch die bis dahin ungetestete Whitelist
+  unter Test (7 neue Proben, Passwort-Subrolle schlägt weiterhin alles — auch bei `AXWebArea`). 158 Tests grün,
+  Mail-Nachrichtenrumpf handverifiziert. **Weiter nicht erreichbar** (bewusst, per Diagnose belegt): Suchfelder
+  wie Spotify (liefert **gar kein** fokussiertes AX-Element) und das VS-Code-Suchfeld (meldet sich als
+  `AXStaticText settable=false`) — dort bleibt es bei ⌘V, da der einzige Ausweg (blind tippen ohne Feld-Check)
+  gerade in Suchfeldern am riskantesten wäre (z. B. Spotify: Leertaste = Play/Pause).
 - [x] **M8-Teil vorgezogen — Prompt-Prefix-Cache** (LLM-Latenz). Der `MLXRefiner` cacht den
   festen 424-Token-Systemprompt **einmal** beim `preload()` und generiert pro Diktat nur den
   kurzen Suffix (Diktattext) gegen diesen KV-Cache; danach wird der Cache auf die Präfixlänge

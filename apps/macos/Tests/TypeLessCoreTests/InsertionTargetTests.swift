@@ -74,6 +74,77 @@ func mitBedienungshilfenLiefertDasFokuszielEineEchteAntwort() {
             ".unbekannt bedeutet ausschließlich: TypeLess kann es nicht wissen")
 }
 
+// MARK: - Klassifizierung eines fokussierten Elements (reine Logik, ohne AX)
+
+// Diese Proben brauchen KEIN Recht und KEIN Fenster: `klassifiziere(...)` entscheidet allein aus
+// Rolle, Subrolle und Setzbarkeit. So sind die Sicherheitsregeln, die sonst hinter der echten
+// AX-Abfrage in `fokusziel()` verborgen (und darum ungetestet) waren, scharf prüfbar.
+
+@Test
+func einSetzbaresTextfeldIstBeschreibbar() {
+    #expect(AXInsertionTarget.klassifiziere(
+        rolle: kAXTextFieldRole as String, subrolle: nil, setzbar: true) == .beschreibbaresTextfeld)
+    #expect(AXInsertionTarget.klassifiziere(
+        rolle: kAXTextAreaRole as String, subrolle: nil, setzbar: true) == .beschreibbaresTextfeld)
+    #expect(AXInsertionTarget.klassifiziere(
+        rolle: kAXComboBoxRole as String, subrolle: nil, setzbar: true) == .beschreibbaresTextfeld)
+}
+
+@Test
+func einSetzbarerWebAreaIstBeschreibbar() {
+    // Der eigentliche Fix: WebKit-editierbare Bereiche (Apple Mail-Nachrichtenrumpf, Webmail,
+    // Rich-Text-Editoren) melden sich als `AXWebArea`. Solange sie setzbar sind, wird dorthin
+    // direkt eingefügt — die vier übrigen Bedingungen in `stelleZu` bleiben davon unberührt.
+    #expect(AXInsertionTarget.klassifiziere(
+        rolle: "AXWebArea", subrolle: nil, setzbar: true) == .beschreibbaresTextfeld)
+}
+
+@Test
+func einNichtSetzbarerWebAreaIstKeinTextfeld() {
+    // Die Setzbarkeitsprüfung ist der Schutz, der `AXWebArea` sicher macht: Eine reine
+    // Anzeige-Webseite (etwa in Safari) meldet `kAXValue` nicht als setzbar und darf NIE ein
+    // Einfüge-Ziel werden. Entfernte man die Setzbarkeitsprüfung, tippte TypeLess in beliebige
+    // Webseiten — diese Probe würde dann rot.
+    #expect(AXInsertionTarget.klassifiziere(
+        rolle: "AXWebArea", subrolle: nil, setzbar: false) == .keinTextfeld)
+}
+
+@Test
+func einNichtSetzbaresTextfeldIstKeinTextfeld() {
+    // Schreibgeschütztes Anzeige-Feld: richtige Rolle, aber nicht setzbar → kein Ziel.
+    #expect(AXInsertionTarget.klassifiziere(
+        rolle: kAXTextFieldRole as String, subrolle: nil, setzbar: false) == .keinTextfeld)
+}
+
+@Test
+func dasPasswortfeldSchlaegtAlles() {
+    // Die Passwort-Subrolle führt IMMER zu `.passwortfeld` — auch bei setzbarem Feld und auch bei
+    // einem WebArea. Entfernte man die Subrollen-Prüfung, käme hier `.beschreibbaresTextfeld`
+    // heraus und TypeLess tippte in ein Passwortfeld.
+    #expect(AXInsertionTarget.klassifiziere(
+        rolle: kAXTextFieldRole as String,
+        subrolle: kAXSecureTextFieldSubrole as String,
+        setzbar: true) == .passwortfeld)
+    #expect(AXInsertionTarget.klassifiziere(
+        rolle: "AXWebArea",
+        subrolle: kAXSecureTextFieldSubrole as String,
+        setzbar: true) == .passwortfeld)
+}
+
+@Test
+func eineFremdeRolleIstKeinTextfeld() {
+    // Knöpfe, Listen, Leinwände u. Ä. sind nie ein Ziel — selbst wenn sie setzbar wären.
+    #expect(AXInsertionTarget.klassifiziere(
+        rolle: kAXButtonRole as String, subrolle: nil, setzbar: true) == .keinTextfeld)
+}
+
+@Test
+func ohneRolleIstKeinTextfeld() {
+    // Fehlgeschlagene Rollen-Abfrage (Element weg, App hängt): die sichere Antwort ist „kein Feld".
+    #expect(AXInsertionTarget.klassifiziere(
+        rolle: nil, subrolle: nil, setzbar: true) == .keinTextfeld)
+}
+
 // MARK: - Abschluss-Review M5: die Identität des fokussierten Elements
 
 @Test
