@@ -166,6 +166,23 @@ kein Datenleck. Das Datenschutz-Versprechen (nie Feldinhalte lesen) bleibt unber
 Zwischenablage, ein ⌘V rettet ihn. Damit gilt „ein Diktat darf nie verloren gehen" wieder
 uneingeschränkt, und zwar erstmals auch für die Apps, in denen M5 heute schon ohne Netz tippt.
 
+**4. Tippen ohne fokussiertes, beschreibbares Element.** Hat die vorderste App beim Loslassen gar
+kein beschreibbares Element im Fokus (kein AX-Baum, ein Suchfeld ohne AX-Antwort, eine reine
+Overlay-Oberfläche), erfüllen trotzdem alle vier Bedingungen — Rechte da, keine sichere Eingabe,
+dieselbe App, kein erkanntes Passwortfeld —, und es wird getippt. Die Ereignisse landen beim
+fokussierten Responder und wirken dort als **Kommandos**, nicht als Text. Genau das hat bis zu
+diesem Branch die Feldtypen-Whitelist verhindert; jetzt verhindert es nichts mehr. Zwei
+Präzisierungen dimensionieren das Risiko richtig:
+
+- **Das alte Spotify-Beispiel („Leertaste = Play/Pause") war mechanisch falsch.**
+  `CGEventTextInserter.insert` postet ausschließlich `virtualKey: 0` mit angehängtem
+  Unicode-String (ein Ereignispaar je 20 UTF-16-Einheiten) — der Leertasten-Keycode (49) wird
+  **nie** gepostet, Play/Pause kann so nicht ausgelöst werden. In diesem Punkt ist TypeLess
+  *harmloser* als echtes Tippen. Was bleibt: Keycode-0-`keyDown`s, die Apps treffen, die
+  `characters` statt des Keycodes auswerten.
+- **Der Schaden ist begrenzt:** Der Text liegt dank Netz (Teil 2) in der Zwischenablage, und der
+  Anwender hatte Tippabsicht.
+
 ## Auswirkung auf den Code
 
 | Datei | Änderung |
