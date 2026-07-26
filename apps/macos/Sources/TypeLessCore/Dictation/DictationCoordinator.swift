@@ -609,8 +609,7 @@ public final class DictationCoordinator {
     ///
     /// **Bewusst eingekaufter Preis:** Ein Fokuswechsel INNERHALB derselben App (⌘L in die
     /// Adressleiste, Tab ins Betreff-Feld) wird nicht mehr erkannt — der Text landet dann im neuen
-    /// Feld. Das ist exakt das Ergebnis, das echtes Tippen gehabt hätte, und der Text liegt
-    /// zusätzlich in der Zwischenablage.
+    /// Feld. Das ist exakt das Ergebnis, das echtes Tippen gehabt hätte.
     ///
     /// Bewusst `static` und ohne `self`: Die Entscheidung hängt ausschließlich von den mitgereichten
     /// Werten ab (`zielApp` DIESES Diktats), nie vom aktuellen Zustand des Koordinators — ein
