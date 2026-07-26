@@ -393,9 +393,12 @@ func druckStartetAufnahmeUndPreload() async throws {
 func loslassenVerarbeitetUndStelltDenTextZu() async throws {
     // M5: Hieß bis M4 `loslassenVerarbeitetUndSchreibtInDieZwischenablage` und prüfte
     // `pasteboard.geschrieben` — das ist seit M5 fachlich falsch: Im Normalfall (dieselbe App,
-    // beschreibbares Textfeld) wird DIREKT eingefügt, und die Zwischenablage bleibt unangetastet.
-    // Der Test prüft unverändert dasselbe: Nach dem Loslassen kommt der Text beim Anwender an,
-    // und der Zustand kehrt nach `.idle` zurück — nur der Weg dorthin ist ein anderer.
+    // beschreibbares Textfeld) wird DIREKT eingefügt. Der Test prüft unverändert dasselbe: Nach
+    // dem Loslassen kommt der Text beim Anwender an, und der Zustand kehrt nach `.idle` zurück —
+    // nur der Weg dorthin ist ein anderer.
+    //
+    // Task 3 (Netz): Der Text landet TROTZDEM zusätzlich in der Zwischenablage — das Netz greift
+    // bei jedem geglückten Diktat, unabhängig vom Zustellweg.
     let hotkey = FakeHotkey()
     let pasteboard = SpyPasteboard()
     let inserter = SpyInserter()
@@ -411,7 +414,7 @@ func loslassenVerarbeitetUndStelltDenTextZu() async throws {
     await warteBis { coordinator.session == .idle }
 
     #expect(inserter.getippt == ["Guten Morgen."])
-    #expect(pasteboard.geschrieben.isEmpty)
+    #expect(pasteboard.geschrieben == ["Guten Morgen."], "das Netz greift auch beim direkten Einfügen")
     #expect(coordinator.session == .idle)
 
     await coordinator.stop()
@@ -465,8 +468,9 @@ func gescheiterterPreloadVerhindertDasDiktatNicht() async throws {
 
     // M5: Prüfte bis M4 `pasteboard.geschrieben` — der Text wird jetzt direkt eingefügt. Die
     // Zusicherung des Tests ist unverändert: Ein gescheiterter Preload kostet das Diktat nichts.
+    // Task 3 (Netz): landet trotzdem zusätzlich in der Zwischenablage.
     #expect(inserter.getippt == ["Trotzdem da."])
-    #expect(pasteboard.geschrieben.isEmpty)
+    #expect(pasteboard.geschrieben == ["Trotzdem da."], "das Netz greift auch beim direkten Einfügen")
 
     await coordinator.stop()
 }
@@ -540,7 +544,8 @@ func unpolierterTextWirdTrotzdemZugestellt() async throws {
     await warteBis { coordinator.session == .idle }
 
     #expect(inserter.getippt == ["roher text"], "ein Diktat darf nie verloren gehen")
-    #expect(pasteboard.geschrieben.isEmpty)
+    // Task 3 (Netz): landet trotzdem zusätzlich in der Zwischenablage.
+    #expect(pasteboard.geschrieben == ["roher text"], "das Netz greift auch beim direkten Einfügen")
     #expect(coordinator.session == .idle, "unpoliert ist kein Fehler")
 
     await coordinator.stop()
@@ -804,7 +809,9 @@ func aeltereVerarbeitungUeberschreibtNichtDenZustandDerNochLaufendenJuengeren() 
     // trotzdem zugestellt, nur der Zustand folgt ihm nicht mehr.
     #expect(inserter.getippt == ["ALT", "NEU"],
            "beide Diktate müssen ankommen, in der Reihenfolge, in der sie fertig wurden")
-    #expect(pasteboard.geschrieben.isEmpty)
+    // Task 3 (Netz): Jedes der beiden geglückten Diktate landet zusätzlich (in derselben
+    // Reihenfolge) in der Zwischenablage — unabhängig davon, ob es getippt wurde.
+    #expect(pasteboard.geschrieben == ["ALT", "NEU"], "das Netz greift bei jedem geglückten Diktat")
 
     await coordinator.stop()
 }
@@ -919,7 +926,10 @@ func verwaisteAufnahmeWirdVorNeustartVerworfen() async throws {
     // M5: Bis M4 an `pasteboard.geschrieben` geprüft — zugestellt wird jetzt direkt.
     #expect(inserter.getippt == ["zweite Aufnahme"],
            "nur die frische Aufnahme darf beim Anwender ankommen")
-    #expect(pasteboard.geschrieben.isEmpty)
+    // Task 3 (Netz): Die verworfene ERSTE Aufnahme erreicht die Engine nie (s.
+    // `client.processCount == 1` oben) und schreibt deshalb nichts — nur die frische, tatsächlich
+    // zugestellte zweite landet zusätzlich in der Zwischenablage.
+    #expect(pasteboard.geschrieben == ["zweite Aufnahme"], "das Netz greift auch beim direkten Einfügen")
 
     await coordinator.stop()
 }
@@ -1019,7 +1029,8 @@ func normalesDiktatBleibtUnberuehrtWennDerZaehlerWaehrendDerAufnahmeNichtSteigt(
 
     // M5: Bis M4 an `pasteboard.geschrieben` geprüft — zugestellt wird jetzt direkt.
     #expect(inserter.getippt == ["normales Diktat"])
-    #expect(pasteboard.geschrieben.isEmpty)
+    // Task 3 (Netz): landet trotzdem zusätzlich in der Zwischenablage.
+    #expect(pasteboard.geschrieben == ["normales Diktat"], "das Netz greift auch beim direkten Einfügen")
     #expect(client.processCount == 1)
 
     await coordinator.stop()
@@ -1104,7 +1115,9 @@ func alreadyRecordingBeimStartSchliesstDasMikrofonUndLegtDasDiktatNichtDauerhaft
 
     // M5: Bis M4 an `pasteboard.geschrieben` geprüft — zugestellt wird jetzt direkt.
     #expect(inserter.getippt == ["frisches Diktat"])
-    #expect(pasteboard.geschrieben.isEmpty)
+    // Task 3 (Netz): landet trotzdem zusätzlich in der Zwischenablage — der frühere Fehlschlag
+    // (oben, `pasteboard.geschrieben.isEmpty`) hatte keinen Text und schreibt deshalb nichts.
+    #expect(pasteboard.geschrieben == ["frisches Diktat"], "das Netz greift auch beim direkten Einfügen")
     #expect(client.processCount == 1)
 
     await coordinator.stop()
@@ -1194,9 +1207,14 @@ func hotkeyDerNieStartetWirdBeimStartAlsAusfallGemeldet() async throws {
 
 @MainActor
 @Test(.timeLimit(.minutes(1)))
-func normalfallTipptDirektUndLaesstDieZwischenablageInRuhe() async throws {
-    // Der Fall, für den M5 gebaut wird — und die wichtigste Zusicherung des Anwenders:
-    // "Diktieren und Kopieren dürfen sich nicht gegenseitig stören."
+func normalfallTipptDirektUndLegtDenTextAlsNetzInDieZwischenablage() async throws {
+    // Der Fall, für den M5 gebaut wird — die wichtigste Zusicherung des Anwenders ist unverändert:
+    // "Diktieren und Kopieren dürfen sich nicht gegenseitig stören", also wird direkt eingefügt.
+    //
+    // Task 3 (Netz): Die frühere M5-Zusicherung "die Zwischenablage bleibt dabei UNANGETASTET" ist
+    // dagegen bewusst gefallen — hieß der Test bis Task 3 entsprechend
+    // `normalfallTipptDirektUndLaesstDieZwischenablageInRuhe`. `CGEventPost` meldet keinen
+    // Misserfolg; ohne das Netz wäre ein von der Zielapp verschlucktes Diktat spurlos weg.
     let hotkey = FakeHotkey()
     let pasteboard = SpyPasteboard()
     let inserter = SpyInserter()
@@ -1213,8 +1231,8 @@ func normalfallTipptDirektUndLaesstDieZwischenablageInRuhe() async throws {
     await warteBis { coordinator.session == .idle }
 
     #expect(inserter.getippt == ["Guten Morgen."], "der Text muss direkt eingefügt werden")
-    #expect(pasteboard.geschrieben.isEmpty,
-            "die Zwischenablage bleibt im Normalfall UNANGETASTET — Entscheidung des Anwenders")
+    #expect(pasteboard.geschrieben == ["Guten Morgen."],
+            "das Netz greift auch im Normalfall — Preis: die Zwischenablage ist jetzt nicht mehr unangetastet")
 
     await coordinator.stop()
 }
@@ -1417,7 +1435,11 @@ func jedesDiktatPruftSeineEigeneGemerkteApp() async throws {
 
     #expect(inserter.getippt == ["Zweites Diktat."],
             "das zweite Diktat gehört in App 99 — dort steht der Anwender, dort wird getippt")
-    #expect(pasteboard.geschrieben == ["Erstes Diktat."], "sonst blieb sie unangetastet")
+    // Task 3 (Netz): Auch das ZWEITE (direkt eingefügte) Diktat landet zusätzlich in der
+    // Zwischenablage — das Netz unterscheidet nicht nach Zustellweg. Die Zwischenablage trägt
+    // danach BEIDE Diktate, in der Reihenfolge, in der sie fertig wurden.
+    #expect(pasteboard.geschrieben == ["Erstes Diktat.", "Zweites Diktat."],
+            "das Netz greift bei jedem geglückten Diktat, auch beim direkt eingefügten zweiten")
 
     await coordinator.stop()
 }
@@ -1856,4 +1878,52 @@ func beiSichererEingabeWirdNichtGetippt() async {
     await diktiere(target: target, inserter: inserter, pasteboard: pasteboard)
 
     #expect(inserter.getippt.isEmpty, "bei sicherer Eingabe käme Getipptes nicht an")
+}
+
+// MARK: - Zwischenablage als Netz (Spec Teil 2)
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func auchBeiErfolgreichemTippenLiegtDerTextInDerZwischenablage() async {
+    // Das Netz: `CGEventPost` meldet keinen Misserfolg. Schluckt eine App die Ereignisse, wäre der
+    // Text ohne Netz spurlos weg. Deshalb liegt er IMMER auch in der Zwischenablage — die
+    // M5-Zusicherung „bei Erfolg unangetastet" ist dafür bewusst aufgegeben.
+    let target = FakeTarget()
+    let inserter = SpyInserter()
+    let pasteboard = SpyPasteboard()
+
+    await diktiere(target: target, inserter: inserter, pasteboard: pasteboard)
+
+    #expect(inserter.getippt == ["Hallo"])
+    #expect(pasteboard.geschrieben == ["Hallo"], "das Netz gilt auch im Erfolgsfall")
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func dasNetzWirdVorDemTippenGeschrieben() async {
+    // Die Reihenfolge ist tragend, nicht beliebig: Wirft der Einfüger, muss der Text trotzdem
+    // vollständig in der Zwischenablage liegen — und zwar genau EINMAL, nicht zweimal.
+    let target = FakeTarget()
+    let inserter = SpyInserter(fehler: .ereignisNichtErzeugbar)
+    let pasteboard = SpyPasteboard()
+
+    await diktiere(target: target, inserter: inserter, pasteboard: pasteboard)
+
+    #expect(inserter.getippt.isEmpty)
+    #expect(pasteboard.geschrieben == ["Hallo"], "genau einmal geschrieben, nicht doppelt")
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func leererTextFasstDieZwischenablageNichtAn() async {
+    // Ein leeres Diktat darf die Zwischenablage nicht ohne Gegenwert zerstören — alter Inhalt
+    // schlägt Leere.
+    let target = FakeTarget()
+    let inserter = SpyInserter()
+    let pasteboard = SpyPasteboard()
+
+    await diktiere(target: target, inserter: inserter, pasteboard: pasteboard, text: "")
+
+    #expect(pasteboard.geschrieben.isEmpty, "leerer Text wird nie geschrieben")
+    #expect(inserter.getippt.isEmpty)
 }

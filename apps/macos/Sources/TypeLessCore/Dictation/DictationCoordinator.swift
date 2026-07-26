@@ -33,9 +33,13 @@ public enum SessionState: Sendable, Equatable {
 /// (s. ``stelleZu(_:zielApp:target:inserter:pasteboard:)``).
 ///
 /// **Verbindlich (Entscheidung des Anwenders):** kein Ton; ein Overlay zeigt den Verlauf.
-/// Deshalb bleibt bei **jedem** Fehlschlag die Zwischenablage unangetastet — dann liefert ⌘V
-/// wenigstens den alten Inhalt statt Leere. Und wurde direkt eingefügt, bleibt sie ebenfalls
-/// unangetastet: „Diktieren und Kopieren dürfen sich nicht gegenseitig stören."
+/// Bei **jedem Fehlschlag** bleibt die Zwischenablage unangetastet — dann liefert ⌘V wenigstens
+/// den alten Inhalt statt Leere.
+///
+/// Ein **geglücktes** Diktat landet dagegen IMMER auch in der Zwischenablage (Netz, s.
+/// `stelleZu`) — auch wenn direkt eingefügt wurde. Die frühere M5-Zusicherung „bei Erfolg bleibt
+/// sie unangetastet" ist dafür bewusst aufgegeben: `CGEventPost` meldet keinen Misserfolg, ohne
+/// Netz wäre ein verpufftes Diktat spurlos weg. Preis: vorher Kopiertes ist nach jedem Diktat weg.
 @MainActor
 @Observable
 public final class DictationCoordinator {
@@ -609,7 +613,9 @@ public final class DictationCoordinator {
     ///
     /// **Bewusst eingekaufter Preis:** Ein Fokuswechsel INNERHALB derselben App (⌘L in die
     /// Adressleiste, Tab ins Betreff-Feld) wird nicht mehr erkannt — der Text landet dann im neuen
-    /// Feld. Das ist exakt das Ergebnis, das echtes Tippen gehabt hätte.
+    /// Feld. Das ist exakt das Ergebnis, das echtes Tippen gehabt hätte. Und selbst das ist kein
+    /// Verlust: Dank des Netzes (s. unten) liegt der Text zusätzlich in der Zwischenablage — er
+    /// steht also nur an der falschen Stelle, ist aber nicht weg.
     ///
     /// Bewusst `static` und ohne `self`: Die Entscheidung hängt ausschließlich von den mitgereichten
     /// Werten ab (`zielApp` DIESES Diktats), nie vom aktuellen Zustand des Koordinators — ein
@@ -624,26 +630,34 @@ public final class DictationCoordinator {
         // unterscheiden können.
         guard !text.isEmpty else { return .nichtsErkannt }
 
+        // DAS NETZ (Spec Teil 2): Der Text liegt in JEDEM Fall in der Zwischenablage — und zwar
+        // BEVOR getippt wird. Die Reihenfolge ist tragend: `CGEventPost` meldet keinen Misserfolg
+        // (s. ``TextInserter``), „erst tippen, bei Misserfolg schreiben" ist also unmöglich.
+        // Schluckt eine App die Ereignisse, rettet ⌘V das Diktat.
+        //
+        // Damit ist die M5-Zusicherung „bei Erfolg bleibt die Zwischenablage unangetastet" bewusst
+        // aufgegeben (Entscheidung des Anwenders): Das Netz wiegt höher als eine ungestörte
+        // Zwischenablage. Preis: vorher Kopiertes ist nach jedem Diktat weg.
+        pasteboard.write(text)
+
         // Bedingung 1: Ohne Bedienungshilfen verwirft macOS jedes synthetische Ereignis.
         // Bedingung 2: Bei Secure Event Input ebenso — unabhängig von den Bedienungshilfen.
         // Beide sind Physik, nicht Vorsicht: Getipptes käme nicht an, `CGEventPost` meldet das aber
-        // nicht zurück (s. ``TextInserter``) — das Diktat wäre bei zufriedener Anzeige verloren.
+        // nicht zurück (s. ``TextInserter``) — das Diktat wäre ohne das Netz oben bei zufriedener
+        // Anzeige verloren.
         guard target.bedienungshilfenErteilt(), !target.sichereEingabeIstAktiv() else {
-            pasteboard.write(text)
             return .inZwischenablage(text: text)
         }
 
         // Bedingung 3: dieselbe App wie beim Fn-Druck. Der einzige Fall, in dem ein Fokuswechsel
         // SICHER feststeht — und ohne Sonderrecht prüfbar (`NSWorkspace`).
         guard let zielApp, target.vordersteApp() == zielApp else {
-            pasteboard.write(text)
             return .inZwischenablage(text: text)
         }
 
         // Bedingung 4: kein Passwortfeld. Greift nur, wo AX überhaupt Auskunft gibt — die ehrlich
         // benannte Grenze (s. ``InsertionTarget/istPasswortfeld()``).
         guard !target.istPasswortfeld() else {
-            pasteboard.write(text)
             return .inZwischenablage(text: text)
         }
 
@@ -651,8 +665,8 @@ public final class DictationCoordinator {
             try inserter.insert(text)
             return .eingefuegt
         } catch {
-            // Ein Diktat darf nie verloren gehen.
-            pasteboard.write(text)
+            // Ein Diktat darf nie verloren gehen — hier bereits durch das Netz oben abgedeckt,
+            // ein zweites Schreiben wäre nur Verdopplung.
             return .inZwischenablage(text: text)
         }
     }
