@@ -1930,3 +1930,55 @@ func leererTextFasstDieZwischenablageNichtAn() async {
     #expect(pasteboard.geschrieben.isEmpty, "leerer Text wird nie geschrieben")
     #expect(inserter.getippt.isEmpty)
 }
+
+// MARK: - Abbruch beim Sprechen (Spec Teil 3)
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func abbruchWaehrendDesSprechensWirdGemeldet() async {
+    // Der Anwender redet, merkt „Quatsch" und drückt bei gehaltenem Fn eine Taste. Die
+    // Fn-als-Modifier-Wache verwirft das Diktat — bisher kommentarlos. Jetzt sagt das Overlay es.
+    let hotkey = FakeHotkey()
+    let recorder = FakeRecorder(samples: sprache())
+    let client = DictationClient(ergebnis: .success(ergebnis("darf nie ankommen")))
+    let counter = FakeKeyDownCounter()
+    let pasteboard = SpyPasteboard()
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: recorder, client: client,
+                                      pasteboard: pasteboard, keyDownCounter: counter)
+    await coordinator.start()
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    counter.druecke()          // eine Taste bei gehaltenem Fn = Abbruch
+    hotkey.send(.released)
+
+    await warteBis { coordinator.overlay == .abgebrochen }
+
+    #expect(coordinator.session == .idle, "ein Abbruch ist kein Fehler")
+    #expect(coordinator.overlay == .abgebrochen)
+    #expect(client.processCount == 0, "die Engine wird gar nicht bemüht")
+    #expect(pasteboard.geschrieben.isEmpty, "die Zwischenablage bleibt unangetastet")
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func kurzesFnPlusTasteMeldetNichts() async {
+    // DER ÄRGERNIS-FALL: Fn+Pfeil und Fn+Entf sind normale Tastaturnutzung, kein Diktat. Dabei darf
+    // KEIN „Abgebrochen" aufpoppen. Unterschieden wird an der Audio-Menge: unter
+    // `minimumSampleCount` war es kein Diktat. Entfernte man diese Schwelle, poppte das Overlay bei
+    // jedem Fn+Pfeil auf — diese Probe würde dann rot.
+    let hotkey = FakeHotkey()
+    let recorder = FakeRecorder(samples: [Float](repeating: 0.5, count: 100))  // weit unter 4 800
+    let client = DictationClient(ergebnis: .success(ergebnis("egal")))
+    let counter = FakeKeyDownCounter()
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: recorder, client: client,
+                                      pasteboard: SpyPasteboard(), keyDownCounter: counter)
+    await coordinator.start()
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    counter.druecke()
+    hotkey.send(.released)
+
+    await warteBis { coordinator.session == .idle }
+
+    #expect(coordinator.overlay == .aus, "kurzes Fn+Pfeil bleibt kommentarlos")
+}
