@@ -1429,7 +1429,10 @@ func jedesDiktatPruftSeineEigeneGemerkteApp() async throws {
             "der überholte Text darf nicht verloren gehen — er landet in der Zwischenablage")
 
     // Gegenprobe: Das ZWEITE Diktat gehört nach App 99, dort steht der Anwender — es wird direkt
-    // eingefügt. Das belegt, dass die Zwischenablage oben nicht aus einem anderen Grund kam.
+    // eingefügt. Die Unterscheidung „richtige vs. falsche App" beweist ab hier ausschließlich
+    // `inserter.getippt` (welche App tatsächlich getippt wurde); die Zwischenablage taugt dafür
+    // nicht mehr als Beweis — sie trägt seit dem Netz (Task 3) ohnehin JEDES geglückte Diktat,
+    // unabhängig vom Zustellweg.
     client.freigeben(mit: .success(ergebnis("Zweites Diktat.")))
     await warteBis { coordinator.session == .idle }
 
