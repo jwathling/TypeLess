@@ -18,6 +18,9 @@ public enum SessionState: Sendable, Equatable {
     /// Input). Ein eigener Fall und **nicht** `.failed`,
     /// weil das Menü sonst ein Warnzeichen zeigte, wo nichts schiefging — und weil der Anwender
     /// genau wissen soll, dass jetzt ⌘V dran ist.
+    ///
+    /// Hinweis: Der Text liegt bei **jedem** geglückten Diktat in der Zwischenablage (Netz, s.
+    /// `stelleZu`). Dieser Zustand sagt darüber hinaus, dass ⌘V **nötig** ist.
     case inZwischenablage
     /// Der letzte Fehlschlag, im Klartext — sichtbar bis zum nächsten Diktat.
     case failed(String)
