@@ -25,16 +25,15 @@ public enum TextInserterError: Error, Equatable {
 /// tatsächlich angekommen ist. Diese Bestätigung gibt es auf dieser Schnittstelle schlicht nicht.
 ///
 /// Der Schutz davor liegt deshalb **außerhalb** dieses Typs: Der Aufrufer darf `insert()` nur
-/// aufrufen, wenn ``InsertionTarget/fokusziel()`` ein `.beschreibbaresTextfeld` gemeldet hat —
-/// was weder ohne erteilte Bedienungshilfen noch bei aktivem Secure Event Input passiert (in
-/// beiden Fällen kommt `.unbekannt` heraus, s. ``AXInsertionTarget/fokusziel()``). Diese
-/// Vorab-Prüfung ist **Pflicht, nicht Kür**: Ohne sie tippt TypeLess ins Leere und das Diktat ist
-/// spurlos weg — genau das, was M5 ausschließen soll.
+/// aufrufen, wenn ``InsertionTarget/bedienungshilfenErteilt()`` erteilt und
+/// ``InsertionTarget/sichereEingabeIstAktiv()`` **nicht** aktiv ist (s. die vier Bedingungen in
+/// `DictationCoordinator.stelleZu`). Diese Vorab-Prüfung ist **Pflicht, nicht Kür**: Ohne sie
+/// tippt TypeLess ins Leere und das Diktat ist spurlos weg — genau das, was M5 ausschließen soll.
 ///
 /// **Ehrlich benannt:** Damit sind die *bekannten* Gründe abgedeckt, nicht bewiesenermaßen alle.
 /// Eine Zustellbestätigung gibt es auf dieser Ebene nicht — sie ließe sich nur erkaufen, indem man
 /// den Inhalt des Zielfeldes läse, und das schließt das Datenschutz-Versprechen dieses Projekts
-/// aus (gleiche Abwägung wie bei ``Fokusziel/passwortfeld``).
+/// aus (gleiche Abwägung wie bei ``InsertionTarget/istPasswortfeld()``).
 ///
 /// Als Protokoll, damit der ``DictationCoordinator`` testbar bleibt, ohne dass im Testlauf
 /// wirklich irgendwo Text erscheint.
