@@ -11,7 +11,7 @@ Native **SwiftUI-Shell** (Hotkey, Audio, Overlay, Text-Einfügen) + **Python-MLX
 (STT + LLM), verbunden über einen lokalen **Unix-Domain-Socket** (kein TCP).
 
 ```
-apps/macos/   # SwiftUI-App: Hotkey, Audio, Overlay, Einfügen, Settings   (M4 fertig, nur macOS)
+apps/macos/   # SwiftUI-App: Hotkey, Audio, Overlay, Einfügen, Settings   (M5-Umkehrung fertig, nur macOS)
 engine/       # Python-Sidecar: STT + LLM + Wörterbuch + Pipeline          (M1 fertig)
 ```
 
@@ -205,11 +205,14 @@ Systemdiktat, poppt bei jedem Diktat der Emoji-Picker auf — die App weist im M
   Leere) — s. Spec.
 - [x] **M5** — Text an der Cursorposition einfügen (statt Zwischenablage). `Sources/TypeLessCore/
   Insertion/`: `InsertionTarget` (fragt über die AX-Schnittstelle, wohin eingefügt werden darf —
-  vorderste App; **liest nie Feldinhalte**, `kAXValueAttribute` nur auf Setzbarkeit) und
-  `TextInserter` (`CGEventKeyboardSetUnicodeString`, surrogatpaar-sichere Zerlegung, baut erst
+  vorderste App; **liest nie Feldinhalte** — `kAXValueAttribute` wird inzwischen gar nicht mehr
+  angefasst, die frühere Setzbarkeitsprüfung gehörte zur seither entfernten Vorab-Klassifizierung)
+  und `TextInserter` (`CGEventKeyboardSetUnicodeString`, surrogatpaar-sichere Zerlegung, baut erst
   alle Ereignisse und postet dann — kein halb eingefügter Text). Der `DictationCoordinator`
-  prüft beim Zustellen **vier** Bedingungen, sonst Zwischenablage: Bedienungshilfen erteilt,
-  Secure Event Input aus, dieselbe App, kein Passwortfeld. **Oberste Regel: entweder eingefügt
+  prüfte beim Zustellen **fünf** Bedingungen (heute vier, s. M5-Umkehrung unten), sonst
+  Zwischenablage: Bedienungshilfen erteilt **und** Secure Event Input aus, dieselbe App, dasselbe
+  Textfeld (Element-Identität, nicht Inhalt), ein beschreibbares Feld, kein Passwortfeld.
+  **Oberste Regel: entweder eingefügt
   oder in der Zwischenablage — nie ein drittes Ergebnis.** (Der Text liegt inzwischen **immer**
   zusätzlich in der Zwischenablage — Netz, s. M5-Umkehrung unten.) Die M4-Regel „die
   Zwischenablage bekommt jedes Ergebnis" ist **gefallen**: Jedes Diktat prüft seinen **eigenen**
@@ -236,15 +239,17 @@ Systemdiktat, poppt bei jedem Diktat der Emoji-Picker auf — die App weist im M
   Rich-Text-Editoren). Solche Felder melden sich über die Bedienungshilfen als **`AXWebArea`** (WebKit-Editor
   für Formatierung/Bilder), nicht als klassisches `AXTextField`/`AXTextArea` — sie standen darum nicht auf
   der Whitelist erlaubter Feldtypen und wichen auf die Zwischenablage aus (per Diagnose belegt: `rolle=AXWebArea
-  settable=true`, trotzdem abgelehnt). Fix: Die reine Rollen-Logik ist aus `AXInsertionTarget.fokusziel()` in
-  die AX-freie, testbare `AXInsertionTarget.klassifiziere(rolle:subrolle:setzbar:)` gezogen; sie lässt
-  `AXWebArea` **nur zusammen mit `settable=true`** zu — eine reine Anzeige-Webseite (Safari) meldet `kAXValue`
-  nicht als setzbar und fällt heraus, es wird also nie in eine nicht editierbare Seite getippt. Die **fünf
-  M5-Bedingungen blieben zum Zeitpunkt dieses Fixes unverändert** (gleiche App, gleiches Feld, kein
-  Passwortfeld, kein blind tippen); der Fix erweiterte nur die Liste beschreibbarer Feldtypen. (Heute
-  sind es vier AX-freie Bedingungen, s. M5-Umkehrung unten.) Damit kommt auch die bis dahin ungetestete Whitelist
-  unter Test (7 neue Proben, Passwort-Subrolle schlägt weiterhin alles — auch bei `AXWebArea`). 158 Tests grün,
-  Mail-Nachrichtenrumpf handverifiziert.
+  settable=true`, trotzdem abgelehnt). Fix: Die reine Rollen-Logik wurde aus `AXInsertionTarget.fokusziel()`
+  in die AX-freie, testbare `AXInsertionTarget.klassifiziere(rolle:subrolle:setzbar:)` gezogen (beide
+  Bezeichner inzwischen mit der M5-Umkehrung entfernt, s. unten); sie ließ `AXWebArea` **nur zusammen mit
+  `settable=true`** zu — eine reine Anzeige-Webseite (Safari) meldete `kAXValue` nicht als setzbar und fiel
+  heraus, es wurde also nie in eine nicht editierbare Seite getippt. Die **fünf M5-Bedingungen blieben zum
+  Zeitpunkt dieses Fixes unverändert** (gleiche App, gleiches Feld, kein Passwortfeld, kein blind tippen);
+  der Fix erweiterte nur die Liste beschreibbarer Feldtypen. (Heute sind es vier AX-freie Bedingungen, s.
+  M5-Umkehrung unten.) Damit kam auch die bis dahin ungetestete Whitelist unter Test (7 neue Proben,
+  Passwort-Subrolle schlug weiterhin alles — auch bei `AXWebArea`); diese Proben sind mit der Whitelist
+  selbst inzwischen wieder entfernt (s. M5-Umkehrung unten). 158 Tests grün, Mail-Nachrichtenrumpf
+  handverifiziert.
 - [x] **M5-Umkehrung — einfach tippen, überall.** Die M5-Vorabprüfung fragte über die
   Bedienungshilfen, *ob* getippt werden darf. Zwei ihrer fünf Bedingungen brauchten ein
   **fokussiertes AX-Element** („beschreibbares Textfeld?", „noch dasselbe Feld?") — und genau daran
@@ -266,7 +271,11 @@ Systemdiktat, poppt bei jedem Diktat der Emoji-Picker auf — die App weist im M
   Adressleiste, Tab ins Betreff-Feld) wird nicht mehr erkannt — der Text landet dann im neuen Feld,
   genau wie beim echten Tippen, und liegt dank Netz trotzdem in der Zwischenablage. Die
   Passwortfeld-Erkennung greift nur, wo AX Auskunft gibt; wo nicht, wird hineingetippt (Schaden
-  asymmetrisch harmlos: TypeLess tippt **hinein** und liest nie **heraus**).
+  asymmetrisch harmlos: TypeLess tippt **hinein** und liest nie **heraus**). Fehlt ein
+  beschreibbares Element im Fokus ganz, wirken die Ereignisse beim fokussierten Responder als
+  **Kommandos** statt als Text — `CGEventTextInserter` postet dabei aber ausschließlich
+  `virtualKey: 0`, nie den Leertasten-Keycode (49), Play/Pause & Co. bleiben also außen vor
+  (s. Spec, Restrisiko 4).
 - [x] **M8-Teil vorgezogen — Prompt-Prefix-Cache** (LLM-Latenz). Der `MLXRefiner` cacht den
   festen 424-Token-Systemprompt **einmal** beim `preload()` und generiert pro Diktat nur den
   kurzen Suffix (Diktattext) gegen diesen KV-Cache; danach wird der Cache auf die Präfixlänge

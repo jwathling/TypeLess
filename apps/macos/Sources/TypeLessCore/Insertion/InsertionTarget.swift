@@ -125,7 +125,8 @@ public struct AXInsertionTarget: InsertionTarget {
     }
 
     /// Die reine Passwort-Regel, **ohne jede AX-Abfrage** — damit sie ohne Fenster und ohne
-    /// erteilte Rechte scharf prüfbar ist (gleiche Bauart wie vormals `klassifiziere`).
+    /// erteilte Rechte scharf prüfbar ist (bewusst vom AX-Layer getrennt, aus demselben Grund wie
+    /// die injizierbaren Nähte oben).
     ///
     /// Die AX-Schnittstelle kennt keine eigene Passwort-**Rolle** (`kAXSecureTextFieldRole`
     /// existiert nicht, geprüft gegen `AXRoleConstants.h`): Ein Passwortfeld meldet sich als
