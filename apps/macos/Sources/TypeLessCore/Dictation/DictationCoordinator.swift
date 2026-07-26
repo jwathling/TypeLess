@@ -12,11 +12,10 @@ public enum SessionState: Sendable, Equatable {
     /// Der Text ist fertig, konnte aber nicht sicher direkt eingefügt werden — er liegt in der
     /// Zwischenablage, ⌘V holt ihn.
     ///
-    /// **Kein Fehler.** Alles hat funktioniert; nur eine der fünf Bedingungen fürs direkte
-    /// Einfügen war nicht erfüllt (andere App im Vordergrund, **anderes Textfeld als beim
-    /// Fn-Druck**, kein Textfeld im Fokus, Passwortfeld, oder TypeLess kann es nicht wissen —
-    /// fehlende Bedienungshilfen bzw. aktives Secure Event Input). Ein eigener Fall und
-    /// **nicht** `.failed`,
+    /// **Kein Fehler.** Alles hat funktioniert; nur eine der vier Bedingungen fürs direkte
+    /// Einfügen war nicht erfüllt (**andere App im Vordergrund** als beim Fn-Druck, Passwortfeld,
+    /// oder TypeLess kann es nicht wissen — fehlende Bedienungshilfen bzw. aktives Secure Event
+    /// Input). Ein eigener Fall und **nicht** `.failed`,
     /// weil das Menü sonst ein Warnzeichen zeigte, wo nichts schiefging — und weil der Anwender
     /// genau wissen soll, dass jetzt ⌘V dran ist.
     case inZwischenablage
@@ -31,7 +30,7 @@ public enum SessionState: Sendable, Equatable {
 ///
 /// **Die oberste Regel von M5:** Der fertige Text wird **entweder** an der Cursorposition
 /// eingefügt — **oder** er liegt in der Zwischenablage. Ein drittes Ergebnis gibt es nicht
-/// (s. ``stelleZu(_:zielApp:zielFokus:target:inserter:pasteboard:)``).
+/// (s. ``stelleZu(_:zielApp:target:inserter:pasteboard:)``).
 ///
 /// **Verbindlich (Entscheidung des Anwenders):** kein Ton; ein Overlay zeigt den Verlauf.
 /// Deshalb bleibt bei **jedem** Fehlschlag die Zwischenablage unangetastet — dann liefert ⌘V
@@ -361,18 +360,15 @@ public final class DictationCoordinator {
         // in `handleReleased()`, ob Fn als Modifier benutzt wurde (s. `KeyDownCounter`).
         zaehlerBeimDruck = keyDownCounter.aktuellerStand()
 
-        // M5: Ziel-App UND Ziel-Textfeld so früh wie möglich merken — jetzt steht der Cursor noch
-        // dort, wo der Anwender diktieren will. Beim Zustellen (in ~6 s) wird gegen BEIDES geprüft:
-        // Die App allein unterscheidet nicht zwischen dem Textfeld einer Seite und der Adressleiste
-        // desselben Browsers (s. `fokusBeimDruck`).
-        // Electron-/Chromium-Apps bauen ihren AX-Baum erst auf Anforderung auf — sonst sieht die
-        // Zustellung kein Feld und weicht auf die Zwischenablage aus. Die vorderste App JETZT
-        // wecken (der App-Wechsel-Beobachter, s. BedienungshilfenAufwecker, tut das i. d. R. schon
-        // vorher; dies deckt den Fall ab, dass die App beim TypeLess-Start bereits vorne war).
+        // Ziel-App so früh wie möglich merken — jetzt steht der Cursor noch dort, wo der Anwender
+        // diktieren will. Beim Zustellen (in ~6 s) wird dagegen geprüft (Bedingung 3).
+        // Electron-/Chromium-Apps beim Fn-Druck wecken: Ohne aufgebauten AX-Baum kann die
+        // Passwortfeld-Prüfung (Bedingung 4) nichts erkennen. Der App-Wechsel-Beobachter
+        // (s. `BedienungshilfenAufwecker`) tut das i. d. R. schon vorher; dies deckt den Fall ab,
+        // dass die App beim TypeLess-Start bereits vorne war.
         let vorne = target.vordersteApp()
         if let vorne { target.weckeBedienungshilfen(fuer: vorne) }
         zielAppBeimDruck = vorne
-        fokusBeimDruck = target.fokusKennung()
 
         // C1 (Review M4, Critical): Verliert der Koordinator ein `.released` (macOS schaltet den
         // CGEventTap kurz ab — `FnKeyMonitor` macht ihn selbst wieder scharf, aber das Ereignis,
@@ -522,7 +518,7 @@ public final class DictationCoordinator {
 
         session = .processing
         overlay = .verarbeitet
-        verarbeite(samples, zielApp: zielAppBeimDruck, zielFokus: fokusBeimDruck)
+        verarbeite(samples, zielApp: zielAppBeimDruck)
     }
 
     // MARK: - Verarbeitung
@@ -541,7 +537,7 @@ public final class DictationCoordinator {
         case fehler(String)
     }
 
-    private func verarbeite(_ samples: [Float], zielApp: pid_t?, zielFokus: Fokuskennung?) {
+    private func verarbeite(_ samples: [Float], zielApp: pid_t?) {
         let pcm = samples.withUnsafeBufferPointer { Data(buffer: $0) }
         // Die Task über eine Kennung verwalten, nicht über sich selbst: Eine lokale Variable,
         // die ihre eigene Closure einfängt, ist unter strict concurrency nicht erlaubt.
@@ -559,9 +555,6 @@ public final class DictationCoordinator {
         // der Zustellung und müssen die Task deshalb überleben; `zielApp` ist ein WERT und wird
         // ohnehin mitgereicht — genau das macht die neue M5-Regel aus: Jede Verarbeitung prüft
         // IHREN eigenen gemerkten Fokus, nicht den der jüngsten.
-        //
-        // Dasselbe gilt für `zielFokus` (Abschluss-Review M5): ebenfalls ein WERT, ebenfalls
-        // mitgereicht — jede Verarbeitung prüft IHR gemerktes Textfeld, nicht das der jüngsten.
         //
         // Klargestellt (M4-Abschluss-Review, „Zusätzlich, klein"): Das ist KEINE Garantie fürs
         // Beenden der App selbst. `applicationShouldTerminate` (`TypeLessApp.swift`) ruft direkt
@@ -587,7 +580,6 @@ public final class DictationCoordinator {
                 // möglich ist, in die Zwischenablage gelegt) — nur `session` folgt ihm ggf. nicht
                 // mehr (s. `beendeVerarbeitung`).
                 let zustellung = Self.stelleZu(ergebnis.finalText, zielApp: zielApp,
-                                               zielFokus: zielFokus,
                                                target: target, inserter: inserter,
                                                pasteboard: pasteboard)
                 // Kein `await`: Diese Task übernimmt bei ihrer Erzeugung die MainActor-Isolation
@@ -603,77 +595,61 @@ public final class DictationCoordinator {
         verarbeitungen[id] = task
     }
 
-    /// Die fünf Bedingungen der Zustellung — **alle** müssen erfüllt sein, sonst Zwischenablage.
+    /// Die vier Bedingungen der Zustellung — **alle** müssen erfüllt sein, sonst Zwischenablage.
     ///
-    /// Bewusst `static` und ohne `self`: Diese Entscheidung hängt AUSSCHLIESSLICH von den
-    /// mitgereichten Werten ab (`zielApp` und `zielFokus` DIESES Diktats), nie vom aktuellen
-    /// Zustand des Koordinators. Genau das ist die gefallene M4-Regel — ein überholtes Diktat darf
-    /// nicht dorthin tippen, wo der Anwender INZWISCHEN steht.
+    /// **Die Umkehrung gegenüber M5:** Früher wurde vorab gefragt, ob das Ziel ein beschreibbares
+    /// Textfeld ist und ob es noch dasselbe ist. Beide Fragen brauchten ein fokussiertes
+    /// AX-Element — und genau daran scheiterten Apps mit unvollständigem AX-Baum (Spotify liefert
+    /// kein Element, das VS-Code-Suchfeld meldet `AXStaticText`). Dort wurde nie getippt, obwohl das
+    /// Tippen angekommen WÄRE.
+    ///
+    /// Jetzt wird getippt, außer in vier Fällen, die **alle ohne fokussiertes AX-Element** prüfbar
+    /// sind. Zwei davon sind keine Vorsicht, sondern Physik (macOS verwirft die Ereignisse
+    /// garantiert), einer ist ein nachgewiesener App-Wechsel, einer das Passwortfeld.
+    ///
+    /// **Bewusst eingekaufter Preis:** Ein Fokuswechsel INNERHALB derselben App (⌘L in die
+    /// Adressleiste, Tab ins Betreff-Feld) wird nicht mehr erkannt — der Text landet dann im neuen
+    /// Feld. Das ist exakt das Ergebnis, das echtes Tippen gehabt hätte, und der Text liegt
+    /// zusätzlich in der Zwischenablage.
+    ///
+    /// Bewusst `static` und ohne `self`: Die Entscheidung hängt ausschließlich von den mitgereichten
+    /// Werten ab (`zielApp` DIESES Diktats), nie vom aktuellen Zustand des Koordinators — ein
+    /// überholtes Diktat darf nicht dorthin tippen, wo der Anwender INZWISCHEN steht.
     private static func stelleZu(_ text: String,
                                  zielApp: pid_t?,
-                                 zielFokus: Fokuskennung?,
                                  target: InsertionTarget,
                                  inserter: TextInserter,
                                  pasteboard: Pasteboard) -> Zustellung {
-        // Leerer Text (M1, Abschluss-Review M5): nichts zu tun, nichts anzufassen — aber auch
-        // NICHT als Erfolg melden. Bis M5 lief das als `.eingefuegt` durch und endete auf `.idle`:
-        // Der Anwender sah damit exakt dasselbe wie nach einem geglückten Diktat — nämlich nichts.
-        // Ohne Overlay und ohne Ton ist das Menüsymbol seine einzige Rückmeldung; es muss den
-        // Unterschied zwischen „ist eingefügt" und „da war nichts" machen können. Es geht dabei
-        // kein Text verloren (es gibt keinen), und die Zwischenablage bleibt unangetastet.
+        // Leerer Text: nichts zu tun, nichts anzufassen — aber auch NICHT als Erfolg melden. Ohne
+        // Ton ist das Overlay die einzige Rückmeldung; es muss „ist eingefügt" von „da war nichts"
+        // unterscheiden können.
         guard !text.isEmpty else { return .nichtsErkannt }
 
-        // Bedingung 2: dieselbe App wie beim Fn-Druck.
+        // Bedingung 1: Ohne Bedienungshilfen verwirft macOS jedes synthetische Ereignis.
+        // Bedingung 2: Bei Secure Event Input ebenso — unabhängig von den Bedienungshilfen.
+        // Beide sind Physik, nicht Vorsicht: Getipptes käme nicht an, `CGEventPost` meldet das aber
+        // nicht zurück (s. ``TextInserter``) — das Diktat wäre bei zufriedener Anzeige verloren.
+        guard target.bedienungshilfenErteilt(), !target.sichereEingabeIstAktiv() else {
+            pasteboard.write(text)
+            return .inZwischenablage(text: text)
+        }
+
+        // Bedingung 3: dieselbe App wie beim Fn-Druck. Der einzige Fall, in dem ein Fokuswechsel
+        // SICHER feststeht — und ohne Sonderrecht prüfbar (`NSWorkspace`).
         guard let zielApp, target.vordersteApp() == zielApp else {
             pasteboard.write(text)
             return .inZwischenablage(text: text)
         }
 
-        // Bedingungen 1, 3 und 4: Recht vorhanden, beschreibbares Textfeld, kein Passwortfeld.
-        // `.unbekannt` deckt BEIDE Fälle ab, in denen TypeLess nicht wissen kann, ob getippter
-        // Text überhaupt ankäme: fehlende Bedienungshilfen UND aktives Secure Event Input
-        // (C1, Review zu Task 4 — s. ``AXInsertionTarget/fokusziel()``, dort steht die
-        // Begründung). Dann wird NICHT geraten: `CGEventPost` meldet nichts zurück
-        // (s. ``TextInserter``), Getipptes verpuffte also wirkungslos, ohne dass es jemand
-        // merkte, und das Diktat wäre spurlos weg — bei zufriedener Anzeige.
-        //
-        // Diese Vorab-Prüfung ist der einzige Schutz, den diese Ebene HAT — eine Bestätigung, dass
-        // Getipptes angekommen ist, gibt es auf der CGEvent-Schnittstelle nicht (s. ``TextInserter``).
-        // Sie deckt die bekannten Gründe fürs Verpuffen ab, nicht beweisbar alle: Pflicht, nicht Kür.
-        guard target.fokusziel() == .beschreibbaresTextfeld else {
-            pasteboard.write(text)
-            return .inZwischenablage(text: text)
-        }
-
-        // Bedingung 5 (Abschluss-Review M5): dasselbe TEXTFELD wie beim Fn-Druck.
-        //
-        // Die App-Prüfung oben sieht nicht, was INNERHALB einer App passiert: ⌘L im Browser
-        // (Adressleiste), Tab in Mail (Betreff) — gleiche Prozesskennung, beschreibbares Textfeld,
-        // kein Passwortfeld. Alle vier bisherigen Bedingungen wären erfüllt, und das Diktat landete
-        // in der Adressleiste. Also wird zusätzlich verglichen, ob der Cursor noch in DEM Feld
-        // steht, in das der Anwender vor dem Sprechen geklickt hat.
-        //
-        // **Datenschutz:** Verglichen wird ausschließlich die IDENTITÄT des Elements
-        // (``Fokuskennung``, undurchsichtig, nur `==`), niemals sein Inhalt — TypeLess erfährt nie,
-        // was in dem Feld steht, in das es schreibt.
-        //
-        // `guard let zielFokus`: Ist beim Fn-Druck GAR KEINE Kennung gemerkt worden (kein Recht,
-        // kein fokussiertes Element), wird nicht getippt. „Nichts gemerkt" ist kein Freibrief — die
-        // Zwischenablage ist hier die sichere Antwort, nicht das Raten.
-        //
-        // **Bewusst akzeptierter Preis** (dem Anwender genannt, von ihm angenommen): Manche Apps
-        // bauen ihre AX-Elemente im Hintergrund neu, ohne dass der Anwender etwas tut — dann weicht
-        // TypeLess hier gelegentlich unnötig auf die Zwischenablage aus, obwohl der Cursor nie
-        // bewegt wurde. Das ist der harmlosere Fehler; der umgekehrte (Diktat in der Adressleiste)
-        // ist der ärgerlichere.
-        guard let zielFokus, target.fokusKennung() == zielFokus else {
+        // Bedingung 4: kein Passwortfeld. Greift nur, wo AX überhaupt Auskunft gibt — die ehrlich
+        // benannte Grenze (s. ``InsertionTarget/istPasswortfeld()``).
+        guard !target.istPasswortfeld() else {
             pasteboard.write(text)
             return .inZwischenablage(text: text)
         }
 
         do {
             try inserter.insert(text)
-            // Erfolg: Die Zwischenablage bleibt UNANGETASTET (Entscheidung des Anwenders).
             return .eingefuegt
         } catch {
             // Ein Diktat darf nie verloren gehen.
