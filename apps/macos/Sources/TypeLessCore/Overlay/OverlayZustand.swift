@@ -15,6 +15,9 @@ public enum OverlayZustand: Sendable, Equatable {
     /// Der Text wurde direkt an der Cursorposition eingefügt — kurze Erfolgsmeldung, KEIN Text
     /// (er steht ja schon im Feld).
     case eingefuegt
+    /// Das Diktat wurde vom Anwender abgebrochen (Taste bei gehaltenem Fn). **Kein Fehler** —
+    /// eigener Fall, damit das Overlay kein Warnzeichen zeigt, wo nichts schiefging.
+    case abgebrochen
     /// Der Text liegt in der Zwischenablage (⌘V). Hier — und nur hier — zeigt das Overlay eine
     /// gekürzte Vorschau, damit der Anwender sieht, was ⌘V einfügt.
     case zwischenablage(vorschau: String)

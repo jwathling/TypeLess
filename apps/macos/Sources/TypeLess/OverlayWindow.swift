@@ -18,6 +18,11 @@ struct OverlayView: View {
                 zeile { ProgressView().controlSize(.small) } text: { Text("Verarbeitet …") }
             case .eingefuegt:
                 zeile { Image(systemName: "checkmark").foregroundStyle(.green) } text: { Text("Eingefügt") }
+            case .abgebrochen:
+                // Bewusst `.secondary` statt der orangen Warnfarbe von `.fehler`: Ein Abbruch ist
+                // kein Fehlschlag, sondern eine bestätigte Absicht des Anwenders.
+                zeile { Image(systemName: "xmark.circle").foregroundStyle(.secondary) }
+                    text: { Text("Abgebrochen") }
             case let .zwischenablage(vorschau):
                 VStack(alignment: .leading, spacing: 5) {
                     zeile { Image(systemName: "doc.on.clipboard") } text: { Text("Fertig · ⌘V") }

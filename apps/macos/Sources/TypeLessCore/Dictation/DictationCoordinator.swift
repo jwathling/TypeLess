@@ -147,6 +147,8 @@ public final class DictationCoordinator {
     private let dauerZwischenablage: Duration
     /// Fehler — dazwischen: lang genug zum Lesen, kurz genug, um nicht zu nerven.
     private let dauerFehler: Duration
+    /// Abgebrochen — kurz, es ist nur eine Bestätigung ohne Inhalt.
+    private let dauerAbgebrochen: Duration
 
     public init(hotkey: HotkeyMonitor,
                 recorder: AudioRecorder,
@@ -162,7 +164,8 @@ public final class DictationCoordinator {
                 pegelIntervall: Duration = .milliseconds(66),
                 dauerEingefuegt: Duration = .seconds(1),
                 dauerZwischenablage: Duration = .seconds(4),
-                dauerFehler: Duration = .milliseconds(2500)) {
+                dauerFehler: Duration = .milliseconds(2500),
+                dauerAbgebrochen: Duration = .milliseconds(1500)) {
         self.hotkey = hotkey
         self.recorder = recorder
         self.client = client
@@ -178,6 +181,7 @@ public final class DictationCoordinator {
         self.dauerEingefuegt = dauerEingefuegt
         self.dauerZwischenablage = dauerZwischenablage
         self.dauerFehler = dauerFehler
+        self.dauerAbgebrochen = dauerAbgebrochen
     }
 
     // MARK: - Lebenszyklus
@@ -469,11 +473,21 @@ public final class DictationCoordinator {
         // Rauschen/Tastaturklappern, aus dem Whisper halluziniert — bei einer Kombination, die
         // länger als die Mindestdauer gehalten wird (beim mehrfachen Drücken normal), greift
         // auch das Stille-Gate nicht (Raumrauschen/Tastaturklappern liegen über -50 dBFS).
-        // Kommentarlos verwerfen: kein Fehler, die Zwischenablage bleibt unangetastet, die
-        // Engine wird gar nicht erst bemüht.
+        // Verwerfen: kein Fehler, die Zwischenablage bleibt unangetastet, die Engine wird gar
+        // nicht erst bemüht.
         guard zaehlerBeimLoslassen == zaehlerBeimDruck else {
             session = .idle
-            overlay = .aus
+            // Nur melden, wenn wirklich gesprochen wurde. Die Wache kann nicht unterscheiden, ob
+            // der Anwender ABBRECHEN wollte oder Fn nur als MODIFIER benutzt hat (Fn+Pfeil,
+            // Fn+Entf) — beides führt zum Verwerfen, und das ist richtig. Eine Meldung bei jedem
+            // Fn+Pfeil wäre aber ein Ärgernis: Das ist normale Tastaturnutzung, kein Diktat.
+            // Dieselbe Schwelle wie beim versehentlichen Antippen entscheidet das.
+            if recording.werte.count >= minimumSampleCount {
+                overlay = .abgebrochen
+                blendeAusNach(dauerAbgebrochen)
+            } else {
+                overlay = .aus
+            }
             return
         }
 
