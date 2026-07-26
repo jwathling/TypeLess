@@ -6,13 +6,22 @@
 
 ## Ziel
 
-TypeLess soll seinen Text **überall** an der Cursorposition einfügen — auch dort, wo die
-Bedienungshilfen keine oder eine unbrauchbare Auskunft geben: **Spotify-Suchfeld**,
-**VS-Code-Suchfeld**, und jedes weitere Feld, das seine AX-Rolle nicht sauber meldet.
+Drei zusammenhängende Änderungen am Zustellweg:
 
-Der Weg dorthin ist eine **Umkehrung der M5-Logik**: nicht mehr „fragen, ob getippt werden darf",
+1. **Überall einfügen.** TypeLess soll seinen Text auch dort an der Cursorposition einfügen, wo die
+   Bedienungshilfen keine oder eine unbrauchbare Auskunft geben: **Spotify-Suchfeld**,
+   **VS-Code-Suchfeld**, und jedes weitere Feld, das seine AX-Rolle nicht sauber meldet.
+2. **Zwischenablage als Netz.** Jedes Diktat landet **zusätzlich** in der Zwischenablage, damit kein
+   Text verloren gehen kann — auch dann nicht, wenn das Tippen unerwartet verpufft.
+3. **Abbruch beim Sprechen sichtbar machen.** Der Abbruch existiert technisch schon, gibt aber keine
+   Rückmeldung.
+
+Der Weg zu (1) ist eine **Umkehrung der M5-Logik**: nicht mehr „fragen, ob getippt werden darf",
 sondern „tippen — außer in den wenigen Fällen, in denen es nachweislich schadet oder wirkungslos
 wäre".
+
+Der Abbruch **während der Verarbeitung** ist bewusst **nicht** Teil dieser Spec — er braucht eine
+eigene Hotkey-Infrastruktur und ist als eigenes Feature geführt (s. Spec `2026-07-26-diktat-abbrechen-design.md`).
 
 ## Hintergrund (belegte Diagnose)
 
@@ -46,10 +55,10 @@ genau ein Szenario ab — *der Anwender hat während der ~6 s den Fokus gewechse
 mit dem Totalausfall in jeder App, deren AX-Baum unvollständig ist. Das Restrisiko nach der
 Umkehrung ist identisch mit dem, was beim echten Tippen ohnehin passiert wäre.
 
-## Ansatz
+## Teil 1: Die neue Zustellregel
 
-`stelleZu` prüft nur noch **drei Bedingungen, die alle ohne fokussiertes AX-Element auskommen** —
-plus die Passwortfeld-Prüfung, soweit sie greift. Sonst wird getippt.
+`stelleZu` prüft nur noch **vier Bedingungen, die alle ohne fokussiertes AX-Element auskommen**
+(die Passwortfeld-Prüfung, soweit sie greift, eingeschlossen). Sonst wird getippt.
 
 ```
 1. Bedienungshilfen erteilt?      AXIsProcessTrusted()          — sonst verpufft jedes CGEvent
@@ -58,12 +67,12 @@ plus die Passwortfeld-Prüfung, soweit sie greift. Sonst wird getippt.
 4. Kein Passwortfeld?             AX-Subrolle, falls verfügbar
 
 alle vier erfüllt  -> tippen
-sonst              -> Zwischenablage (wie bisher)
+sonst              -> nur Zwischenablage
 ```
 
 Bedingung 1 und 2 sind **keine Vorsicht, sondern Physik**: Ohne Bedienungshilfen und bei aktiver
 sicherer Eingabe (Terminal, 1Password) verwirft macOS synthetische Tastatur-Ereignisse garantiert.
-Ohne diese beiden Prüfungen wäre das Diktat spurlos weg, bei zufriedener Anzeige. Beide kosten
+Ohne diese beiden Prüfungen wäre das Tippen wirkungslos, bei zufriedener Anzeige. Beide kosten
 nichts und brauchen kein AX-Element.
 
 Bedingung 3 ist der billige Rest der alten Fokusprüfung: Ist beim Loslassen eine andere App vorne
@@ -86,28 +95,66 @@ Die beiden Bedingungen, die ein fokussiertes AX-Element brauchen:
 `Fokuskennung` und die Whitelist werden **entfernt**, nicht ungenutzt liegen gelassen — toter Code
 in einem sicherheitsrelevanten Pfad ist schlechter als ein Git-Verlauf, der beides zurückholt.
 
-### Was ausdrücklich bleibt
+## Teil 2: Zwischenablage als Netz
 
-- **Die Zwischenablage bleibt bei Erfolg unangetastet.** Unverändert die Entscheidung des Anwenders.
-- **Der Zwischenablage-Fallback** für die vier Ausnahmen oben — inklusive der Regel, dass bei
-  einem *Fehler* (Engine weg) die Zwischenablage unberührt bleibt: alter Inhalt schlägt Leere.
-- **`AXManualAccessibility`-Aufwecker** (Electron-Nachbesserung). Er wird für das Tippen nicht mehr
-  gebraucht, aber weiterhin für die Passwortfeld-Erkennung: Ohne AX-Baum keine Subrolle, keine
-  Erkennung.
-- **`.cgAnnotatedSessionEventTap`** als Post-Ziel. Ein Wechsel auf `.cghidEventTap` bleibt
-  verboten — daran hängt die Fn-als-Modifier-Wache (s. `KeyDownCounter`).
-- **Keine Mini-Pausen zwischen den Häppchen.** Verlorene Zeichen bei schnell gepostetem
-  `CGEventPost` sind eine bekannte Fehlerklasse (Electron, Java), in TypeLess aber **nie
-  aufgetreten** — M5 wurde ohne Pausen in mehreren Apps handverifiziert. Prophylaxe ohne Beleg wäre
-  genau der Fehler, den diese Spec bei den AX-Abfragen korrigiert. Nachrüsten, falls die Handprobe
-  Zeichenverlust zeigt (Kosten wären ohnehin vernachlässigbar: ~26 ms bei 250 Zeichen).
+**Jedes Diktat mit nicht-leerem Text wird in die Zwischenablage geschrieben — vor dem Tippen.**
+
+Die Reihenfolge ist tragend, nicht beliebig: Nur wenn der Text **vor** dem Tippversuch in der
+Zwischenablage liegt, trägt das Netz auch dann, wenn das Tippen unerwartet verpufft (App schluckt
+annotierte Session-Ereignisse). Umgekehrt — erst tippen, dann bei Misserfolg schreiben — funktioniert
+nicht, weil `CGEventPost` keinen Misserfolg meldet.
+
+Damit ist die bisherige Zusicherung **„bei Erfolg bleibt die Zwischenablage unangetastet"
+aufgehoben**. Das war eine ausdrückliche Anwender-Entscheidung aus M5 und wird hier bewusst
+zurückgenommen, weil das Netz höher wiegt.
+
+**Der Preis, bewusst gezahlt:** Nach jedem Diktat ist vorher Kopiertes weg. Wer eine URL kopiert und
+dann diktiert, findet die URL nicht mehr in der Zwischenablage. Als Nebennutzen ist das letzte
+Diktat dafür immer greifbar und lässt sich mehrfach einfügen.
+
+Unverändert bleiben zwei Regeln:
+
+- **Leerer Text wird nicht geschrieben.** Es gibt nichts zu retten, und ein leerer Text würde die
+  Zwischenablage ohne Gegenwert zerstören (`.nichtsErkannt`).
+- **Bei einem Fehler bleibt die Zwischenablage unangetastet** (Engine weg, STT-Ausfall): Es gibt
+  keinen Text, also nichts zu schreiben — alter Inhalt schlägt Leere.
+
+**Die Anzeige muss weiter unterscheiden.** Obwohl der Text jetzt immer in der Zwischenablage liegt,
+bleibt die Unterscheidung `.eingefuegt` gegen `.inZwischenablage` erhalten: Sie sagt dem Anwender, ob
+er noch ⌘V drücken muss. Die Textvorschau im Overlay erscheint weiterhin nur bei
+`.inZwischenablage` — beim Einfügen steht der Text ja schon im Feld.
+
+## Teil 3: Abbruch beim Sprechen sichtbar machen
+
+Der Abbruch **existiert schon**, als Nebeneffekt der Fn-als-Modifier-Wache: Wer bei gehaltenem Fn
+eine Taste drückt, dessen Diktat wird verworfen (`KeyDownCounter`, s. `handleReleased()`). Redest du,
+merkst „Quatsch" und tippst Escape, während Fn unten bleibt, ist das Diktat weg — Zwischenablage
+unberührt, Engine nie bemüht.
+
+Das passiert heute **kommentarlos**. Genau das ändert dieser Teil: Das Overlay meldet kurz
+„Abgebrochen".
+
+**Die Wache selbst bleibt inhaltlich unverändert.** Insbesondere bleibt die Event-Maske des Taps
+ausschließlich `.flagsChanged` — sie um `.keyDown` zu erweitern wäre ein Datenschutzbruch (M4).
+Es kommt nur eine Rückmeldung hinzu.
+
+### Wann die Meldung erscheint — und wann nicht
+
+Die Wache kann nicht unterscheiden, ob der Anwender **abbrechen** wollte oder Fn nur als **Modifier**
+benutzt hat (Fn+Pfeil, Fn+Entf). Beides führt zum Verwerfen, und das ist richtig. Eine Meldung bei
+*jedem* Fn+Pfeil wäre aber ein Ärgernis — das ist normale Tastaturnutzung, kein Diktat.
+
+Deshalb wird an die bereits vorhandene Schwelle angeknüpft: Die Meldung erscheint **nur, wenn
+mindestens `minimumSampleCount` Audio aufgenommen wurde** — also wenn der Anwender Fn lange genug
+gehalten hat, dass ein Diktat plausibel ist. Kurzes Fn+Pfeil bleibt kommentarlos wie heute.
 
 ## Restrisiko — ehrlich benannt
 
 **1. Fokuswechsel innerhalb derselben App.** Wechselt der Anwender während der ~6 s das Feld,
 ohne die App zu wechseln, landet der Text im neuen Feld. Beispiele: ⌘L in die Browser-Adressleiste,
 Tab vom Mail-Rumpf ins Betreff-Feld. Das ist **exakt das Ergebnis, das echtes Tippen gehabt hätte**.
-Bewusst eingekauft, weil der Gegenwert — Diktieren funktioniert überall — höher wiegt.
+Bewusst eingekauft, weil der Gegenwert — Diktieren funktioniert überall — höher wiegt. Der Text liegt
+zudem in der Zwischenablage (Teil 2), ist also nicht verloren, sondern nur an der falschen Stelle.
 
 **2. Die Passwortfeld-Erkennung wird schwächer.** Sie hing schon in M5 an der Subrolle
 `AXSecureTextField`; jetzt greift sie zusätzlich nur dort, wo überhaupt ein AX-Element auffindbar
@@ -115,24 +162,22 @@ ist. In einer App ohne AX-Baum wird in ein Passwortfeld hineingetippt. Der Schad
 harmlos: TypeLess tippt **hinein** und liest nie **heraus** — Folge ist ein fehlgeschlagener Login,
 kein Datenleck. Das Datenschutz-Versprechen (nie Feldinhalte lesen) bleibt unberührt.
 
-**3. Verpufftes Tippen ohne Netz.** Schluckt eine App annotierte Session-Ereignisse, ist das Diktat
-verloren — die Zwischenablage bleibt bei erfolgreichem Tippen ja bewusst unangetastet, enthält den
-Text also nicht. Das ist **kein neues** Risiko: In
-allen Apps, in denen M5 heute direkt tippt, besteht es schon und ist nie aufgetreten. Die bekannten
-Gründe fürs Verpuffen (fehlende Rechte, sichere Eingabe) sind durch Bedingung 1 und 2 abgedeckt.
-Falls sich das in der Praxis als störend erweist, wäre ein Menüpunkt „letztes Diktat in die
-Zwischenablage" der nächste Schritt — **nicht** Teil dieser Spec (YAGNI).
+**3. Verpufftes Tippen** — durch Teil 2 **abgeräumt**: Der Text liegt in jedem Fall in der
+Zwischenablage, ein ⌘V rettet ihn. Damit gilt „ein Diktat darf nie verloren gehen" wieder
+uneingeschränkt, und zwar erstmals auch für die Apps, in denen M5 heute schon ohne Netz tippt.
 
 ## Auswirkung auf den Code
 
 | Datei | Änderung |
 |---|---|
 | `Insertion/InsertionTarget.swift` | `Fokusziel`-Whitelist und `Fokuskennung` entfernen; Schnittstelle auf `vordersteApp()`, `bedienungshilfenErteilt()`, `sichereEingabeAktiv()`, `istPasswortfeld()`, `weckeBedienungshilfen(fuer:)` reduzieren |
-| `Dictation/DictationCoordinator.swift` | `stelleZu` auf die drei Bedingungen + Passwortfeld umbauen; `zielFokus` aus `verarbeite`/`handlePressed` entfernen |
+| `Dictation/DictationCoordinator.swift` | `stelleZu` auf die vier Bedingungen umbauen und die Zwischenablage **vor** dem Tippen füllen; `zielFokus` aus `verarbeite`/`handlePressed` entfernen; im Verwerfen-Pfad von `handleReleased()` die Abbruch-Meldung setzen (nur über der Audio-Schwelle) |
+| `Overlay/OverlayZustand.swift` | Fall `.abgebrochen` ergänzen (kurze Anzeigedauer, wie `.fehler` ohne Fehlercharakter) |
+| `Dictation/SessionState` | Dokumentation von `.inZwischenablage` nachziehen — sie zählt heute die „fünf Bedingungen" auf |
 | `Insertion/TextInserter.swift` | unverändert |
 | `Tests/…/InsertionTargetTests.swift` | Whitelist-/Identitätsproben ersetzen durch Proben der vier neuen Bedingungen |
-| `Tests/…/DictationCoordinatorTests.swift` | Zustellproben auf die neue Regel umschreiben |
-| `CLAUDE.md` | M5-Abschnitt umschreiben: „fünf Bedingungen" → neue Regel; die überholte Behauptung, Suchfelder seien nicht erreichbar, streichen |
+| `Tests/…/DictationCoordinatorTests.swift` | Zustellproben auf die neue Regel umschreiben; Proben für Netz-Reihenfolge und Abbruch-Meldung ergänzen |
+| `CLAUDE.md` | M5-Abschnitt umschreiben: „fünf Bedingungen" → neue Regel; die überholte Behauptung, Suchfelder seien nicht erreichbar, streichen; Zwischenablage-Verhalten korrigieren |
 
 Die injizierbaren Nähte (`istVertrauenswuerdig`, `sichereEingabeAktiv`) **bleiben** — sie sind der
 Grund, warum die Sicherheitsregeln überhaupt scharf testbar sind, unabhängig vom Zustand der
@@ -143,17 +188,33 @@ Maschine. Für `istPasswortfeld()` kommt eine gleichartige Naht dazu.
 Die Entscheidungslogik bleibt eine reine Funktion über mitgereichte Werte (`static stelleZu`, ohne
 `self`) — jede der vier Bedingungen ist einzeln mit Attrappen prüfbar, ohne Fenster und ohne
 erteilte Rechte. Für jede Bedingung eine Probe „greift" und „greift nicht", plus je eine
-Mutationsprobe: Regel entfernen ⇒ Test rot. Die bestehende Regel „entweder eingefügt oder in der
-Zwischenablage — nie ein drittes Ergebnis" bleibt und bleibt getestet.
+Mutationsprobe: Regel entfernen ⇒ Test rot.
+
+Eigene Proben für die neuen Teile:
+
+- **Netz-Reihenfolge:** Die Zwischenablage-Attrappe muss den Text auch dann enthalten, wenn die
+  Einfüge-Attrappe wirft — und ebenso, wenn sie *nicht* wirft (Netz gilt immer).
+- **Kein Netz ohne Text:** leerer Text ⇒ Zwischenablage unangetastet.
+- **Kein Netz bei Fehler:** Engine wirft ⇒ Zwischenablage unangetastet.
+- **Abbruch-Meldung:** über der Audio-Schwelle ⇒ `.abgebrochen`; darunter (Fn+Pfeil) ⇒ kommentarlos
+  `.aus`. Beide Richtungen, weil genau hier der Ärgernis-Fall liegt.
+
+Die Regel „entweder eingefügt oder in der Zwischenablage — nie ein drittes Ergebnis" bleibt und
+bleibt getestet; sie wird durch das Netz sogar leichter einzuhalten.
 
 **Handprobe (nicht automatisierbar):** Spotify-Suchfeld, VS-Code-Suchfeld, Mail-Rumpf, Claude,
 Slack, Safari-Adressleiste, Terminal mit sicherer Eingabe, natives Passwortfeld. Dabei gezielt auf
-Zeichenverlust bei langem Text achten (s. „Keine Mini-Pausen").
+Zeichenverlust bei langem Text achten (s. unten).
 
-## Nicht Teil dieser Spec
+## Bewusst nicht enthalten
 
-- Simuliertes ⌘V als Einfügeweg — geprüft und verworfen: Es braucht die Zwischenablage und löst ein
-  Problem, das mit direktem Tippen gar nicht entsteht.
-- Wiederherstellen der Zwischenablage nach dem Einfügen — entfällt, weil die Zwischenablage im
-  Erfolgsfall nicht mehr angefasst wird.
-- Menüpunkt „letztes Diktat in die Zwischenablage" — erst, wenn Restrisiko 3 real auftritt.
+- **Keine Mini-Pausen zwischen den Häppchen.** Verlorene Zeichen bei schnell gepostetem
+  `CGEventPost` sind eine bekannte Fehlerklasse (Electron, Java), in TypeLess aber **nie
+  aufgetreten** — M5 wurde ohne Pausen in mehreren Apps handverifiziert. Prophylaxe ohne Beleg wäre
+  genau der Fehler, den diese Spec bei den AX-Abfragen korrigiert. Nachrüsten, falls die Handprobe
+  Zeichenverlust zeigt (Kosten wären ohnehin vernachlässigbar: ~26 ms bei 250 Zeichen).
+- **Simuliertes ⌘V als Einfügeweg** — geprüft und verworfen: Es braucht die Zwischenablage als
+  Übertragungsweg und löst ein Problem, das mit direktem Tippen gar nicht entsteht.
+- **Diktat-Verlauf im Menü** statt des Zwischenablage-Netzes — die aufwandsärmere Variante gewinnt
+  zuerst. Wird erst relevant, wenn das Überschreiben der Zwischenablage im Alltag stört.
+- **Abbruch während der Verarbeitung** — eigenes Feature, s. Spec `2026-07-26-diktat-abbrechen-design.md`.
