@@ -254,12 +254,21 @@ final class FakeTarget: InsertionTarget, @unchecked Sendable {
     /// muss ohne Fenster und ohne erteilte Rechte prüfbar bleiben. Ein Protokoll, das rohe
     /// `AXUIElement` durchreichte, machte diese Attrappe unmöglich.
     private var feld: UInt64?
+    /// Die drei Zustände der neuen Zustellregel (Spec: „einfach tippen"). Defaults sind der
+    /// Normalfall „darf getippt werden", damit bestehende Proben unberührt bleiben.
+    private var bedienungshilfen: Bool
+    private var sichereEingabe: Bool
+    private var passwortfeld: Bool
     private(set) var gewecktePid: pid_t?
 
-    init(app: pid_t? = 42, ziel: Fokusziel = .beschreibbaresTextfeld, feld: UInt64? = 1) {
+    init(app: pid_t? = 42, ziel: Fokusziel = .beschreibbaresTextfeld, feld: UInt64? = 1,
+         bedienungshilfen: Bool = true, sichereEingabe: Bool = false, passwortfeld: Bool = false) {
         self.app = app
         self.ziel = ziel
         self.feld = feld
+        self.bedienungshilfen = bedienungshilfen
+        self.sichereEingabe = sichereEingabe
+        self.passwortfeld = passwortfeld
     }
 
     /// Simuliert, dass der Anwender in eine ANDERE App gewechselt ist.
@@ -276,6 +285,14 @@ final class FakeTarget: InsertionTarget, @unchecked Sendable {
         return feld.map { Fokuskennung.fuerTest($0) }
     }
     func weckeBedienungshilfen(fuer pid: pid_t) { lock.lock(); gewecktePid = pid; lock.unlock() }
+
+    func setzeBedienungshilfen(_ neu: Bool) { lock.lock(); bedienungshilfen = neu; lock.unlock() }
+    func setzeSichereEingabe(_ neu: Bool) { lock.lock(); sichereEingabe = neu; lock.unlock() }
+    func setzePasswortfeld(_ neu: Bool) { lock.lock(); passwortfeld = neu; lock.unlock() }
+
+    func bedienungshilfenErteilt() -> Bool { lock.lock(); defer { lock.unlock() }; return bedienungshilfen }
+    func sichereEingabeIstAktiv() -> Bool { lock.lock(); defer { lock.unlock() }; return sichereEingabe }
+    func istPasswortfeld() -> Bool { lock.lock(); defer { lock.unlock() }; return passwortfeld }
 }
 
 /// Schreibt nur mit, was getippt WORDEN WÄRE — im Test erscheint nirgends echter Text (M5).

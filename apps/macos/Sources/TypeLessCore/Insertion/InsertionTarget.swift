@@ -120,6 +120,29 @@ public protocol InsertionTarget: Sendable {
     /// (Electron/Chromium bauen ihn erst auf Anforderung auf — s. Design). **Setzt nur** ein
     /// Attribut, liest nichts. Für native Apps folgenlos.
     func weckeBedienungshilfen(fuer pid: pid_t)
+
+    /// Ob TypeLess die Bedienungshilfen hat. Ohne sie verwirft macOS jedes synthetische
+    /// Tastatur-Ereignis — Tippen wäre wirkungslos, das Diktat spurlos weg.
+    ///
+    /// Braucht selbst **kein** fokussiertes AX-Element und darum in jeder App verlässlich.
+    func bedienungshilfenErteilt() -> Bool
+
+    /// Ob **Secure Event Input** gerade aktiv ist (Terminal mit „Sichere Tastatureingabe",
+    /// 1Password u. Ä.). Dann verwirft macOS synthetische Tastatur-Ereignisse fremder Prozesse,
+    /// **unabhängig** von den Bedienungshilfen.
+    ///
+    /// Keine Vorsicht, sondern Physik: Ohne diese Prüfung würde getippt, `CGEventPost` meldete
+    /// nichts zurück (s. ``TextInserter``), und das Diktat wäre bei zufriedener Anzeige verloren.
+    func sichereEingabeIstAktiv() -> Bool
+
+    /// Ob das fokussierte Element ein Passwortfeld ist.
+    ///
+    /// **Ehrlich benannte Grenze:** Die Erkennung hängt an der AX-Subrolle
+    /// `AXSecureTextField`. Wo kein AX-Element auffindbar ist (Apps mit unvollständigem Baum) oder
+    /// die Subrolle fehlt, liefert das `false` — dann wird hineingetippt. Schließen ließe sich das
+    /// nur durch Lesen des Feldinhalts, was das Datenschutz-Versprechen ausschließt. Der Schaden
+    /// ist asymmetrisch harmlos: TypeLess tippt **hinein** und liest nie **heraus**.
+    func istPasswortfeld() -> Bool
 }
 
 /// Die echte Umsetzung über die Bedienungshilfen-Schnittstelle (AX).
@@ -281,6 +304,32 @@ public struct AXInsertionTarget: InsertionTarget {
         // Zwischenablage-Fallback wie bisher).
         AXUIElementSetMessagingTimeout(app, 0.5)
         AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+    }
+
+    public func bedienungshilfenErteilt() -> Bool { istVertrauenswuerdig() }
+
+    public func sichereEingabeIstAktiv() -> Bool { sichereEingabeAktiv() }
+
+    /// **Datenschutz:** liest ausschließlich die SUBROLLE — nie den Inhalt des Feldes.
+    /// `kAXValueAttribute` wird in diesem Typ nach der Umkehrung gar nicht mehr angefasst.
+    public func istPasswortfeld() -> Bool {
+        // Ohne Recht liefert AX kein Element; ohne Element keine Subrolle. `false` ist folgenlos,
+        // weil `stelleZu` das fehlende Recht ohnehin schon abgefangen hat.
+        guard istVertrauenswuerdig() else { return false }
+        guard let ax = fokussiertesElement() else { return false }
+        var subrolle: CFTypeRef?
+        AXUIElementCopyAttributeValue(ax, kAXSubroleAttribute as CFString, &subrolle)
+        return Self.istPasswortSubrolle(subrolle as? String)
+    }
+
+    /// Die reine Passwort-Regel, **ohne jede AX-Abfrage** — damit sie ohne Fenster und ohne
+    /// erteilte Rechte scharf prüfbar ist (gleiche Bauart wie vormals `klassifiziere`).
+    ///
+    /// Die AX-Schnittstelle kennt keine eigene Passwort-**Rolle** (`kAXSecureTextFieldRole`
+    /// existiert nicht, geprüft gegen `AXRoleConstants.h`): Ein Passwortfeld meldet sich als
+    /// normales `kAXTextFieldRole` und verrät sich einzig über diese Subrolle.
+    static func istPasswortSubrolle(_ subrolle: String?) -> Bool {
+        subrolle == (kAXSecureTextFieldSubrole as String)
     }
 
     /// Der AX-Knoten mit dem Tastaturfokus — die gemeinsame Wurzel von ``fokusziel()`` und
