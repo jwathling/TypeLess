@@ -1826,7 +1826,14 @@ func ohneAxAuskunftWirdTrotzdemGetippt() async {
     // meldet unveränderlichen Anzeigetext. Beides fiel früher aus der Whitelist und landete in der
     // Zwischenablage. Jetzt wird dort getippt — die Whitelist ist weg. Diese Probe ist der
     // Nachfolger von `ohneGemerktesTextfeldWirdNichtGetippt`, dessen Erwartung sich umkehrt.
-    let target = FakeTarget(app: 42)   // keine Element-Identität, keine Rolle — wie Spotify
+    //
+    // `ziel: .keinTextfeld, feld: nil` bildet genau das nach, was Spotify/VS Code real melden —
+    // unter der ALTEN Fünf-Bedingungen-Regel hätte das abgelehnt (Fund im Review zu Task 2: die
+    // reinen Defaults von `FakeTarget` erfüllen zufällig auch die alte Regel, der Test prüfte also
+    // nichts). `ziel:`/`feld:` bedienen ausschließlich die alte, in Task 5 zu entfernende API
+    // (`Fokusziel`/`Fokuskennung`) — fallen die weg, schrumpft dieser Aufruf auf
+    // `FakeTarget(app: 42)`.
+    let target = FakeTarget(app: 42, ziel: .keinTextfeld, feld: nil)
     let inserter = SpyInserter()
     let pasteboard = SpyPasteboard()
 
