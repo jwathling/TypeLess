@@ -226,7 +226,9 @@ Systemdiktat, poppt bei jedem Diktat der Emoji-Picker auf — die App weist im M
   Apps Layout-Wechsel aus). `Insertion/BedienungshilfenAufwecker` weckt jede App **beim Wechsel**
   (`NSWorkspace.didActivateApplication`, damit der Baum vor dem Fn-Druck steht); zusätzlich weckt der
   `DictationCoordinator` beim Fn-Druck die vorderste App (Absicherung). Die **fünf M5-Bedingungen und
-  `stelleZu` bleiben unverändert** — der Fix macht die AX-Abfragen bei Electron nur überhaupt wirksam.
+  `stelleZu` blieben zum Zeitpunkt dieser Nachbesserung unverändert** — der Fix machte die
+  AX-Abfragen bei Electron nur überhaupt wirksam. (Heute sind es vier AX-freie Bedingungen, s.
+  M5-Umkehrung unten.)
   **Erweiterte, bewusst akzeptierte Grenze:** In Electron-Apps kann ein Passwortfeld ohne
   `AXSecureTextField`-Subrolle nicht als solches erkannt werden → dann würde direkt hineingetippt (Schließen
   ginge nur durch Lesen des Feldinhalts, was das Datenschutz-Versprechen ausschließt).
@@ -238,8 +240,9 @@ Systemdiktat, poppt bei jedem Diktat der Emoji-Picker auf — die App weist im M
   die AX-freie, testbare `AXInsertionTarget.klassifiziere(rolle:subrolle:setzbar:)` gezogen; sie lässt
   `AXWebArea` **nur zusammen mit `settable=true`** zu — eine reine Anzeige-Webseite (Safari) meldet `kAXValue`
   nicht als setzbar und fällt heraus, es wird also nie in eine nicht editierbare Seite getippt. Die **fünf
-  M5-Bedingungen bleiben unverändert** (gleiche App, gleiches Feld, kein Passwortfeld, kein blind tippen); der
-  Fix erweitert nur die Liste beschreibbarer Feldtypen. Damit kommt auch die bis dahin ungetestete Whitelist
+  M5-Bedingungen blieben zum Zeitpunkt dieses Fixes unverändert** (gleiche App, gleiches Feld, kein
+  Passwortfeld, kein blind tippen); der Fix erweiterte nur die Liste beschreibbarer Feldtypen. (Heute
+  sind es vier AX-freie Bedingungen, s. M5-Umkehrung unten.) Damit kommt auch die bis dahin ungetestete Whitelist
   unter Test (7 neue Proben, Passwort-Subrolle schlägt weiterhin alles — auch bei `AXWebArea`). 158 Tests grün,
   Mail-Nachrichtenrumpf handverifiziert.
 - [x] **M5-Umkehrung — einfach tippen, überall.** Die M5-Vorabprüfung fragte über die
