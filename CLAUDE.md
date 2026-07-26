@@ -11,7 +11,7 @@ Native **SwiftUI-Shell** (Hotkey, Audio, Overlay, Text-Einfügen) + **Python-MLX
 (STT + LLM), verbunden über einen lokalen **Unix-Domain-Socket** (kein TCP).
 
 ```
-apps/macos/   # SwiftUI-App: Hotkey, Audio, Overlay, Einfügen, Settings   (M4 fertig, nur macOS)
+apps/macos/   # SwiftUI-App: Hotkey, Audio, Overlay, Einfügen, Settings   (M5-Umkehrung fertig, nur macOS)
 engine/       # Python-Sidecar: STT + LLM + Wörterbuch + Pipeline          (M1 fertig)
 ```
 
@@ -37,7 +37,7 @@ Sources/TypeLess/          # Dünne SwiftUI-Hülle (MenuBarExtra) — zeigt nur 
                           # MenuContent.swift (Menüinhalt, beide Zustandsachsen),
                           # SystemPasteboard.swift (NSPasteboard — AppKit bleibt hier, nicht in
                           # TypeLessCore).
-Tests/TypeLessCoreTests/  # 93 Tests (Swift Testing), fast alle mit Mocks/Fakes — kein echter
+Tests/TypeLessCoreTests/  # 151 Tests (Swift Testing), fast alle mit Mocks/Fakes — kein echter
                           # Sidecar nötig. Zwei Proben fassen echte Audio-Hardware an und
                           # überspringen sich ohne Mikrofonrecht selbst.
 ```
@@ -57,8 +57,11 @@ Audio ──Transcriber──▶ Rohtext ──Wörterbuch──▶ bereinigt �
   über `EngineConfig` wählbar.
 - **RAM-Strategie (16 GB):** STT warm halten, LLM **on-demand** (spekulativer Preload beim
   Hotkey-Druck + Idle-Unload + Memory-Pressure-Handling). Nie beide dauerhaft resident.
-- **Text-Einfügen (ab M5):** primär `CGEventKeyboardSetUnicodeString` (universell, **ohne
-  Clipboard**), AX-API optional, Clipboard nur als letzter Fallback.
+- **Text-Einfügen:** Die Zwischenablage schreibt **immer zuerst** (Netz — `CGEventPost` meldet
+  keinen Misserfolg zurück, „erst tippen, bei Misserfolg schreiben" ist also unmöglich); danach
+  der Versuch mit `CGEventKeyboardSetUnicodeString` (universell), außer bei einer der vier
+  AX-freien Ausschlussbedingungen (s. „Aktueller Stand" → M5-Umkehrung) — dann bleibt es bei der
+  Zwischenablage allein.
 - **Hotkey:** `KeyboardShortcuts` (Sindre Sorhus) + CGEventTap für Hold-to-talk.
 
 ## Austauschbarkeit (wichtiges Prinzip)
@@ -99,7 +102,7 @@ Persönliches Wörterbuch (deterministisch, vor dem LLM): JSON unter
 
 ```bash
 cd apps/macos
-swift build && swift test        # 93 Tests (Swift Testing), Mocks — kein Sidecar nötig
+swift build && swift test        # 151 Tests (Swift Testing), Mocks — kein Sidecar nötig
 
 bash scripts/build-app.sh        # baut TypeLess.app aus dem Repo-Root (relativer Pfad ab dort)
 open apps/macos/TypeLess.app
@@ -124,9 +127,13 @@ danach erst `state.shutdown()` — sonst wird der Engine unter einer noch laufen
 Boden weggezogen.
 
 **Diktieren (ab M4):** **Fn halten**, sprechen, **loslassen** — der bereinigte/verfeinerte Text
-landet in der **Zwischenablage** (⌘V zum Einfügen; automatisches Einfügen an der Cursorposition
-kommt erst in M5). Bewusste Entscheidung des Anwenders: ein kleines Overlay unten mittig auf dem
-Bildschirm zeigt den Verlauf **nur während des Diktats** — Live-Pegel beim Zuhören, Verarbeitung,
+wird an der Cursorposition eingefügt (Regelfall seit der M5-Umkehrung, s. „Aktueller Stand"
+unten) und landet dabei **zusätzlich immer** in der Zwischenablage (Netz, ⌘V liefert denselben
+Text); nur wenn eine der vier Bedingungen fürs direkte Einfügen fehlt, bleibt es bei der
+Zwischenablage allein. Ein Tastendruck bei gehaltenem Fn bricht das Diktat ab — das Overlay
+meldet „Abgebrochen", aber **nur** oberhalb der Audio-Mindestmenge (sonst bliebe ein normales
+Fn+Pfeil kommentarlos). Bewusste Entscheidung des Anwenders: ein kleines Overlay unten mittig auf
+dem Bildschirm zeigt den Verlauf **nur während des Diktats** — Live-Pegel beim Zuhören, Verarbeitung,
 Ergebnis; eine Textvorschau erscheint dabei ausschließlich, wenn der Text in der Zwischenablage
 landet (nie beim direkten Einfügen — der Text steht ja schon im Feld). **Weiterhin keine Töne.**
 Das Menüleisten-Symbol bleibt als zusätzliche Rückmeldung. Voraussetzung: Systemeinstellungen →
@@ -198,21 +205,22 @@ Systemdiktat, poppt bei jedem Diktat der Emoji-Picker auf — die App weist im M
   Leere) — s. Spec.
 - [x] **M5** — Text an der Cursorposition einfügen (statt Zwischenablage). `Sources/TypeLessCore/
   Insertion/`: `InsertionTarget` (fragt über die AX-Schnittstelle, wohin eingefügt werden darf —
-  vorderste App, Fokusziel, Element-Identität; **liest nie Feldinhalte**, `kAXValueAttribute` nur
-  auf Setzbarkeit) und `TextInserter` (`CGEventKeyboardSetUnicodeString`, surrogatpaar-sichere
-  Zerlegung, baut erst alle Ereignisse und postet dann — kein halb eingefügter Text). Der
-  `DictationCoordinator` prüft beim Zustellen **fünf** Bedingungen, sonst Zwischenablage:
-  Bedienungshilfen erteilt **und** Secure Event Input aus, dieselbe App, dasselbe Textfeld
-  (Element-Identität, nicht Inhalt), ein beschreibbares Feld, kein Passwortfeld. **Oberste Regel:
-  entweder eingefügt oder in der Zwischenablage — nie ein drittes Ergebnis.** Bei Erfolg bleibt
-  die Zwischenablage unangetastet. Die M4-Regel „die Zwischenablage bekommt jedes Ergebnis" ist
-  **gefallen**: Jedes Diktat prüft seinen **eigenen** gemerkten Fokus, nicht den des jüngsten
-  (sonst tippte ein überholtes Diktat in das inzwischen fokussierte Fenster). Bedienungshilfen
-  werden beim Start **angefordert** (nicht nur geprüft), das Menü warnt bei fehlendem Recht.
-  122 Tests grün, **mit echter Sprache in mehreren Apps handverifiziert** (direktes Einfügen,
-  Zwischenablage unangetastet). Bekannte, in der Spec benannte Grenzen: Passwortfeld ohne
-  AX-Subrolle; App, die ihre AX-Elemente während der Verarbeitung neu baut → gelegentlich unnötig
-  Zwischenablage.
+  vorderste App; **liest nie Feldinhalte** — `kAXValueAttribute` wird inzwischen gar nicht mehr
+  angefasst, die frühere Setzbarkeitsprüfung gehörte zur seither entfernten Vorab-Klassifizierung)
+  und `TextInserter` (`CGEventKeyboardSetUnicodeString`, surrogatpaar-sichere Zerlegung, baut erst
+  alle Ereignisse und postet dann — kein halb eingefügter Text). Der `DictationCoordinator`
+  prüfte beim Zustellen **fünf** Bedingungen (heute vier, s. M5-Umkehrung unten), sonst
+  Zwischenablage: Bedienungshilfen erteilt **und** Secure Event Input aus, dieselbe App, dasselbe
+  Textfeld (Element-Identität, nicht Inhalt), ein beschreibbares Feld, kein Passwortfeld.
+  **Oberste Regel: entweder eingefügt
+  oder in der Zwischenablage — nie ein drittes Ergebnis.** (Der Text liegt inzwischen **immer**
+  zusätzlich in der Zwischenablage — Netz, s. M5-Umkehrung unten.) Die M4-Regel „die
+  Zwischenablage bekommt jedes Ergebnis" ist **gefallen**: Jedes Diktat prüft seinen **eigenen**
+  gemerkten Fokus, nicht den des jüngsten (sonst tippte ein überholtes Diktat in das inzwischen
+  fokussierte Fenster). Bedienungshilfen werden beim Start **angefordert** (nicht nur geprüft),
+  das Menü warnt bei fehlendem Recht.
+  122 Tests grün, **mit echter Sprache in mehreren Apps handverifiziert** (direktes Einfügen in
+  mehreren Apps). Bekannte, in der Spec benannte Grenze: Passwortfeld ohne AX-Subrolle.
 - [x] **M5-Nachbesserung — direktes Einfügen in Electron-/Chromium-Apps** (Claude, Slack, VS Code, …).
   Solche Apps bauen ihren Bedienungshilfen-Baum erst **auf Anforderung** auf — ohne den fand TypeLess
   dort kein Textfeld und wich auf die Zwischenablage aus (per Diagnose belegt: `kAXFocusedUIElementAttribute`
@@ -221,7 +229,9 @@ Systemdiktat, poppt bei jedem Diktat der Emoji-Picker auf — die App weist im M
   Apps Layout-Wechsel aus). `Insertion/BedienungshilfenAufwecker` weckt jede App **beim Wechsel**
   (`NSWorkspace.didActivateApplication`, damit der Baum vor dem Fn-Druck steht); zusätzlich weckt der
   `DictationCoordinator` beim Fn-Druck die vorderste App (Absicherung). Die **fünf M5-Bedingungen und
-  `stelleZu` bleiben unverändert** — der Fix macht die AX-Abfragen bei Electron nur überhaupt wirksam.
+  `stelleZu` blieben zum Zeitpunkt dieser Nachbesserung unverändert** — der Fix machte die
+  AX-Abfragen bei Electron nur überhaupt wirksam. (Heute sind es vier AX-freie Bedingungen, s.
+  M5-Umkehrung unten.)
   **Erweiterte, bewusst akzeptierte Grenze:** In Electron-Apps kann ein Passwortfeld ohne
   `AXSecureTextField`-Subrolle nicht als solches erkannt werden → dann würde direkt hineingetippt (Schließen
   ginge nur durch Lesen des Feldinhalts, was das Datenschutz-Versprechen ausschließt).
@@ -229,17 +239,43 @@ Systemdiktat, poppt bei jedem Diktat der Emoji-Picker auf — die App weist im M
   Rich-Text-Editoren). Solche Felder melden sich über die Bedienungshilfen als **`AXWebArea`** (WebKit-Editor
   für Formatierung/Bilder), nicht als klassisches `AXTextField`/`AXTextArea` — sie standen darum nicht auf
   der Whitelist erlaubter Feldtypen und wichen auf die Zwischenablage aus (per Diagnose belegt: `rolle=AXWebArea
-  settable=true`, trotzdem abgelehnt). Fix: Die reine Rollen-Logik ist aus `AXInsertionTarget.fokusziel()` in
-  die AX-freie, testbare `AXInsertionTarget.klassifiziere(rolle:subrolle:setzbar:)` gezogen; sie lässt
-  `AXWebArea` **nur zusammen mit `settable=true`** zu — eine reine Anzeige-Webseite (Safari) meldet `kAXValue`
-  nicht als setzbar und fällt heraus, es wird also nie in eine nicht editierbare Seite getippt. Die **fünf
-  M5-Bedingungen bleiben unverändert** (gleiche App, gleiches Feld, kein Passwortfeld, kein blind tippen); der
-  Fix erweitert nur die Liste beschreibbarer Feldtypen. Damit kommt auch die bis dahin ungetestete Whitelist
-  unter Test (7 neue Proben, Passwort-Subrolle schlägt weiterhin alles — auch bei `AXWebArea`). 158 Tests grün,
-  Mail-Nachrichtenrumpf handverifiziert. **Weiter nicht erreichbar** (bewusst, per Diagnose belegt): Suchfelder
-  wie Spotify (liefert **gar kein** fokussiertes AX-Element) und das VS-Code-Suchfeld (meldet sich als
-  `AXStaticText settable=false`) — dort bleibt es bei ⌘V, da der einzige Ausweg (blind tippen ohne Feld-Check)
-  gerade in Suchfeldern am riskantesten wäre (z. B. Spotify: Leertaste = Play/Pause).
+  settable=true`, trotzdem abgelehnt). Fix: Die reine Rollen-Logik wurde aus `AXInsertionTarget.fokusziel()`
+  in die AX-freie, testbare `AXInsertionTarget.klassifiziere(rolle:subrolle:setzbar:)` gezogen (beide
+  Bezeichner inzwischen mit der M5-Umkehrung entfernt, s. unten); sie ließ `AXWebArea` **nur zusammen mit
+  `settable=true`** zu — eine reine Anzeige-Webseite (Safari) meldete `kAXValue` nicht als setzbar und fiel
+  heraus, es wurde also nie in eine nicht editierbare Seite getippt. Die **fünf M5-Bedingungen blieben zum
+  Zeitpunkt dieses Fixes unverändert** (gleiche App, gleiches Feld, kein Passwortfeld, kein blind tippen);
+  der Fix erweiterte nur die Liste beschreibbarer Feldtypen. (Heute sind es vier AX-freie Bedingungen, s.
+  M5-Umkehrung unten.) Damit kam auch die bis dahin ungetestete Whitelist unter Test (7 neue Proben,
+  Passwort-Subrolle schlug weiterhin alles — auch bei `AXWebArea`); diese Proben sind mit der Whitelist
+  selbst inzwischen wieder entfernt (s. M5-Umkehrung unten). 158 Tests grün, Mail-Nachrichtenrumpf
+  handverifiziert.
+- [x] **M5-Umkehrung — einfach tippen, überall.** Die M5-Vorabprüfung fragte über die
+  Bedienungshilfen, *ob* getippt werden darf. Zwei ihrer fünf Bedingungen brauchten ein
+  **fokussiertes AX-Element** („beschreibbares Textfeld?", „noch dasselbe Feld?") — und genau daran
+  scheiterten Apps mit unvollständigem AX-Baum: Spotify liefert **kein** fokussiertes Element, das
+  VS-Code-Suchfeld meldet `AXStaticText settable=false`. Dort wurde nie getippt, obwohl das Tippen
+  angekommen **wäre**. Jetzt wird getippt, außer in **vier** Fällen, die alle **ohne** AX-Element
+  prüfbar sind: Bedienungshilfen fehlen, Secure Event Input aktiv (beides Physik — macOS verwirft
+  die Ereignisse garantiert), andere App als beim Fn-Druck, erkanntes Passwortfeld. `Fokusziel`,
+  `Fokuskennung` und die Feldtypen-Whitelist sind **entfernt**.
+  **Zwischenablage als Netz:** Jedes geglückte Diktat landet **zusätzlich** in der Zwischenablage,
+  geschrieben **vor** dem Tippversuch (`CGEventPost` meldet keinen Misserfolg — „erst tippen, dann
+  bei Misserfolg schreiben" ist unmöglich). Damit ist die M5-Zusicherung „bei Erfolg bleibt die
+  Zwischenablage unangetastet" **bewusst aufgegeben**; bei **Fehlern** bleibt sie weiter unberührt.
+  Preis: vorher Kopiertes ist nach jedem Diktat weg.
+  **Abbruch beim Sprechen:** Eine Taste bei gehaltenem Fn verwirft das Diktat (das tat die
+  Fn-als-Modifier-Wache schon immer) — jetzt meldet das Overlay „Abgebrochen", aber **nur** oberhalb
+  der Audio-Mindestmenge, damit ein normales Fn+Pfeil kommentarlos bleibt.
+  **Bewusst eingekaufte Restrisiken:** Ein Fokuswechsel **innerhalb** derselben App (⌘L in die
+  Adressleiste, Tab ins Betreff-Feld) wird nicht mehr erkannt — der Text landet dann im neuen Feld,
+  genau wie beim echten Tippen, und liegt dank Netz trotzdem in der Zwischenablage. Die
+  Passwortfeld-Erkennung greift nur, wo AX Auskunft gibt; wo nicht, wird hineingetippt (Schaden
+  asymmetrisch harmlos: TypeLess tippt **hinein** und liest nie **heraus**). Fehlt ein
+  beschreibbares Element im Fokus ganz, wirken die Ereignisse beim fokussierten Responder als
+  **Kommandos** statt als Text — `CGEventTextInserter` postet dabei aber ausschließlich
+  `virtualKey: 0`, nie den Leertasten-Keycode (49), Play/Pause & Co. bleiben also außen vor
+  (s. Spec, Restrisiko 4).
 - [x] **M8-Teil vorgezogen — Prompt-Prefix-Cache** (LLM-Latenz). Der `MLXRefiner` cacht den
   festen 424-Token-Systemprompt **einmal** beim `preload()` und generiert pro Diktat nur den
   kurzen Suffix (Diktattext) gegen diesen KV-Cache; danach wird der Cache auf die Präfixlänge
