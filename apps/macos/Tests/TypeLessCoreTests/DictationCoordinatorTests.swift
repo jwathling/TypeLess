@@ -246,14 +246,6 @@ func stille(sekunden: Double = 1.0) -> [Float] {
 final class FakeTarget: InsertionTarget, @unchecked Sendable {
     private let lock = NSLock()
     private var app: pid_t?
-    private var ziel: Fokusziel
-    /// Welches TEXTFELD gerade den Fokus hat (Abschluss-Review M5). `nil` heißt: keine Identität zu
-    /// haben — so, wie die echte AX-Schnittstelle ohne Bedienungshilfen antwortet.
-    ///
-    /// Erfunden, nicht echt: ``Fokuskennung/fuerTest(_:)`` gibt es genau deshalb — der Koordinator
-    /// muss ohne Fenster und ohne erteilte Rechte prüfbar bleiben. Ein Protokoll, das rohe
-    /// `AXUIElement` durchreichte, machte diese Attrappe unmöglich.
-    private var feld: UInt64?
     /// Die drei Zustände der neuen Zustellregel (Spec: „einfach tippen"). Defaults sind der
     /// Normalfall „darf getippt werden", damit bestehende Proben unberührt bleiben.
     private var bedienungshilfen: Bool
@@ -261,11 +253,9 @@ final class FakeTarget: InsertionTarget, @unchecked Sendable {
     private var passwortfeld: Bool
     private(set) var gewecktePid: pid_t?
 
-    init(app: pid_t? = 42, ziel: Fokusziel = .beschreibbaresTextfeld, feld: UInt64? = 1,
+    init(app: pid_t? = 42,
          bedienungshilfen: Bool = true, sichereEingabe: Bool = false, passwortfeld: Bool = false) {
         self.app = app
-        self.ziel = ziel
-        self.feld = feld
         self.bedienungshilfen = bedienungshilfen
         self.sichereEingabe = sichereEingabe
         self.passwortfeld = passwortfeld
@@ -273,17 +263,8 @@ final class FakeTarget: InsertionTarget, @unchecked Sendable {
 
     /// Simuliert, dass der Anwender in eine ANDERE App gewechselt ist.
     func wechsleApp(zu neue: pid_t?) { lock.lock(); app = neue; lock.unlock() }
-    func setzeZiel(_ neues: Fokusziel) { lock.lock(); ziel = neues; lock.unlock() }
-    /// Simuliert, dass der Anwender innerhalb DERSELBEN App in ein anderes Textfeld gesprungen ist
-    /// (⌘L in die Adressleiste des Browsers, Tab vom Mail-Rumpf ins Betreff-Feld).
-    func wechsleFeld(zu neues: UInt64?) { lock.lock(); feld = neues; lock.unlock() }
 
     func vordersteApp() -> pid_t? { lock.lock(); defer { lock.unlock() }; return app }
-    func fokusziel() -> Fokusziel { lock.lock(); defer { lock.unlock() }; return ziel }
-    func fokusKennung() -> Fokuskennung? {
-        lock.lock(); defer { lock.unlock() }
-        return feld.map { Fokuskennung.fuerTest($0) }
-    }
     func weckeBedienungshilfen(fuer pid: pid_t) { lock.lock(); gewecktePid = pid; lock.unlock() }
 
     func setzeBedienungshilfen(_ neu: Bool) { lock.lock(); bedienungshilfen = neu; lock.unlock() }
@@ -1852,13 +1833,11 @@ func ohneAxAuskunftWirdTrotzdemGetippt() async {
     // Zwischenablage. Jetzt wird dort getippt — die Whitelist ist weg. Diese Probe ist der
     // Nachfolger von `ohneGemerktesTextfeldWirdNichtGetippt`, dessen Erwartung sich umkehrt.
     //
-    // `ziel: .keinTextfeld, feld: nil` bildet genau das nach, was Spotify/VS Code real melden —
-    // unter der ALTEN Fünf-Bedingungen-Regel hätte das abgelehnt (Fund im Review zu Task 2: die
-    // reinen Defaults von `FakeTarget` erfüllen zufällig auch die alte Regel, der Test prüfte also
-    // nichts). `ziel:`/`feld:` bedienen ausschließlich die alte, in Task 5 zu entfernende API
-    // (`Fokusziel`/`Fokuskennung`) — fallen die weg, schrumpft dieser Aufruf auf
-    // `FakeTarget(app: 42)`.
-    let target = FakeTarget(app: 42, ziel: .keinTextfeld, feld: nil)
+    // `FakeTarget(app: 42)` reicht: Die reinen Defaults melden weder ein fokussiertes AX-Element
+    // noch dessen Rolle — die alte, fünf Bedingungen umfassende Regel ist mit Task 5 komplett
+    // entfernt, es gibt also gar keine Auskunft mehr, die hier extra auf „kein Feld" gestellt
+    // werden müsste.
+    let target = FakeTarget(app: 42)
     let inserter = SpyInserter()
     let pasteboard = SpyPasteboard()
 

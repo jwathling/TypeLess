@@ -65,28 +65,6 @@ public final class DictationCoordinator {
     /// Anwender längst woanders sein kann.
     private var zielAppBeimDruck: pid_t?
 
-    /// Das Textfeld, in dem beim Fn-Druck der Cursor stand — das ZIEL dieses Diktats, genauer als
-    /// die App allein.
-    ///
-    /// **Warum das nötig ist (Abschluss-Review M5):** Die Ziel-App allein reicht nicht. Der
-    /// Anwender diktiert in ein Textfeld im Browser, drückt in den ~6 s Wartezeit ⌘L und steht in
-    /// der Adressleiste: gleiche Prozesskennung, beschreibbares Textfeld, kein Passwortfeld — alle
-    /// bisherigen Bedingungen erfüllt, und das Diktat landete in der Adressleiste. Dasselbe in Mail
-    /// zwischen Rumpf und Betreff. Entscheidung des Anwenders: „Wenn ich diktiere, muss ich mit dem
-    /// Cursor schon in irgendein Textfeld von irgendeiner Anwendung geklickt haben. Dort soll der
-    /// Text dann eingefügt werden."
-    ///
-    /// Wird — genau wie ``zielAppBeimDruck`` — bei jedem `.pressed` neu gelesen und als **Wert**
-    /// mit dem jeweiligen Diktat mitgereicht (s. `verarbeite`), nicht als Zustand geprüft: Jede
-    /// Verarbeitung prüft IHR eigenes gemerktes Feld, nicht das der jüngsten (die gefallene
-    /// M4-Regel, s. Kommentar bei `stelleZu`).
-    ///
-    /// **Bewusst akzeptierter Preis:** Manche Apps bauen ihre AX-Elemente im Hintergrund neu, ohne
-    /// dass der Anwender etwas tut — dann weicht TypeLess gelegentlich unnötig auf die
-    /// Zwischenablage aus, obwohl der Cursor gar nicht bewegt wurde. Das ist der harmlosere Fehler;
-    /// der umgekehrte (Diktat in der Adressleiste) ist der ärgerlichere.
-    private var fokusBeimDruck: Fokuskennung?
-
     /// 300 ms bei 16 kHz. Darunter war es ein versehentliches Antippen, kein Diktat.
     private let minimumSampleCount: Int
 
