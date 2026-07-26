@@ -642,9 +642,9 @@ public final class DictationCoordinator {
 
         // Bedingung 1: Ohne Bedienungshilfen verwirft macOS jedes synthetische Ereignis.
         // Bedingung 2: Bei Secure Event Input ebenso — unabhängig von den Bedienungshilfen.
-        // Beide sind Physik, nicht Vorsicht: Getipptes käme nicht an, `CGEventPost` meldet das aber
-        // nicht zurück (s. ``TextInserter``) — das Diktat wäre ohne das Netz oben bei zufriedener
-        // Anzeige verloren.
+        // Beide sind Physik, nicht Vorsicht: Getipptes käme nicht an, und `CGEventPost` meldet das
+        // nicht zurück (s. ``TextInserter``) — ohne das Netz oben wäre das Diktat hier spurlos weg,
+        // während die Anzeige Erfolg zeigt.
         guard target.bedienungshilfenErteilt(), !target.sichereEingabeIstAktiv() else {
             return .inZwischenablage(text: text)
         }
