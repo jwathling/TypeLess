@@ -2199,3 +2199,50 @@ func derAbbruchTrifftNurDieJuengsteVerarbeitung() async {
     #expect(inserter.getippt == ["Erstes"],
             "die ältere Verarbeitung darf NICHT mitabgebrochen werden — sie stellt zu")
 }
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func escapeWaehrendDerVerarbeitungBleibtAuchDannAbbruchWennDerTransportEinenFehlerWirft() async {
+    // Critical, Review Task 3: `GatedDictationClient` in den beiden Proben oben löst bei einer
+    // ERFOLGREICHEN Freigabe auf — genau dann greift der `isCancelled`-Check VOR `stelleZu`
+    // („der atomare Schnitt"), aber NIE der `catch`-Zweig der Verarbeitungs-Task. Der echte
+    // Transport (`HTTPUnixTransport.roundTrip`) verhält sich beim Abbruch WÄHREND `receive()`
+    // hängt (der weit überwiegende Fall — ein Diktat braucht Sekunden) anders: `connection
+    // .cancel()` löst den offenen Callback mit einem FEHLER auf (`TransportError.unreachable` →
+    // `SidecarError.unreachable`), NICHT mit `CancellationError` — Network.framework kennt an
+    // dieser Stelle keinen eigenen Abbruchgrund. Nur das `.cancelled`-Fenster in `waitUntilReady`
+    // (Sub-Millisekunden) wirft echtes `CancellationError`, das wird bei einem Abbruch nach
+    // Sekunden realistischer Verarbeitungsdauer praktisch nie getroffen.
+    //
+    // Diese Probe bildet genau das nach: nach dem Abbruch wird mit einem FEHLER statt einem
+    // Erfolg freigegeben — damit wirft `process()` wie in Produktion, und der `catch`-Zweig
+    // (nicht der atomare Schnitt) muss die Abbruch-Erkennung leisten.
+    let hotkey = FakeHotkey()
+    let recorder = FakeRecorder(samples: sprache())
+    let client = GatedDictationClient()
+    let abbruch = FakeAbbruchHotkey()
+    let inserter = SpyInserter()
+    let pasteboard = SpyPasteboard()
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: recorder, client: client,
+                                      pasteboard: pasteboard, inserter: inserter,
+                                      abbruchHotkey: abbruch)
+    await coordinator.start()
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+
+    var iterator = client.processGestartet.makeAsyncIterator()
+    hotkey.send(.released)
+    _ = await iterator.next()
+    await warteBis { coordinator.session == .processing }
+
+    abbruch.druecke()                                            // Escape
+    client.freigeben(mit: .failure(.unreachable))                // wie beim echten Transport
+    await warteBis { coordinator.overlay == .abgebrochen }
+
+    #expect(coordinator.session == .idle, "ein Abbruch ist kein Fehler — auch nicht bei dieser Fehlerform")
+    #expect(coordinator.overlay == .abgebrochen, "kein Warndreieck für einen gewollten Abbruch")
+    #expect(inserter.getippt.isEmpty, "es darf nichts getippt werden")
+    #expect(pasteboard.geschrieben.isEmpty,
+            "bei Abbruch bleibt die Zwischenablage unangetastet — kein Netz")
+    #expect(abbruch.istRegistriert == false, "nach dem Abbruch muss Escape wieder frei sein")
+}
