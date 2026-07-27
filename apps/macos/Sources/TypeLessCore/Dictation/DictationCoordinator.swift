@@ -148,7 +148,17 @@ public final class DictationCoordinator {
                 pasteboard: Pasteboard,
                 inserter: TextInserter = CGEventTextInserter(),
                 target: InsertionTarget = AXInsertionTarget(),
-                abbruchHotkey: AbbruchHotkey = SystemAbbruchHotkey(),
+                // BEWUSST OHNE DEFAULT — anders als `inserter`/`target` darüber. Ein Default
+                // `SystemAbbruchHotkey()` meldet einen echten, systemweiten Escape-Hotkey an;
+                // in einem Testlauf nimmt das dem ganzen Rechner Escape weg, und zwar
+                // UNSICHTBAR (kein Fenster wird beschrieben, keine Ausgabe erscheint). Genau das
+                // passierte: Als dieser Parameter dazukam, fielen fünf bestehende Proben, die den
+                // Init direkt statt über die Test-Factory aufrufen, still auf den echten Typ
+                // zurück — vier davon durchlaufen `.processing` und registrierten damit wirklich
+                // (nachgemessen). Ohne Default hätte der Compiler sie sofort benannt. Die App
+                // übergibt ihn ohnehin explizit (`TypeLessApp.swift`), der Default hatte also
+                // keinen einzigen Produktionsnutzer.
+                abbruchHotkey: AbbruchHotkey,
                 minimumSampleCount: Int = 4_800,
                 beendenZeitlimit: Duration = .seconds(10),
                 beendenPollIntervall: Duration = .milliseconds(20),

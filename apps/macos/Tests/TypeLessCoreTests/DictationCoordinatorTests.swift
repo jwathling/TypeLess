@@ -837,6 +837,7 @@ func stopGibtBeiEinerHaengendenVerarbeitungNachDemZeitlimitAufOhneSieAbzubrechen
     let coordinator = DictationCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
                                            client: client, pasteboard: pasteboard,
                                            inserter: inserter, target: FakeTarget(),
+                                           abbruchHotkey: FakeAbbruchHotkey(),
                                            beendenZeitlimit: .milliseconds(50),
                                            beendenPollIntervall: .milliseconds(5),
                                            keyDownCounter: FakeKeyDownCounter())
@@ -1589,6 +1590,7 @@ func pegelLandetWaehrendDerAufnahmeImOverlay() async throws {
     let coordinator = DictationCoordinator(hotkey: hotkey, recorder: recorder, client: client,
                                            pasteboard: pasteboard, inserter: SpyInserter(),
                                            target: FakeTarget(),
+                                           abbruchHotkey: FakeAbbruchHotkey(),
                                            keyDownCounter: FakeKeyDownCounter(),
                                            pegelIntervall: .milliseconds(2))
     await coordinator.start()
@@ -1627,7 +1629,8 @@ func pegelPollFragtNachDerVerarbeitungNichtMehrBeimRecorderAn() async throws {
     let client = GatedDictationClient()
     let coordinator = DictationCoordinator(hotkey: hotkey, recorder: recorder, client: client,
                                            pasteboard: pasteboard, inserter: inserter,
-                                           target: target, keyDownCounter: FakeKeyDownCounter(),
+                                           target: target, abbruchHotkey: FakeAbbruchHotkey(),
+                                           keyDownCounter: FakeKeyDownCounter(),
                                            pegelIntervall: .milliseconds(2))
     await coordinator.start()
 
@@ -1677,6 +1680,7 @@ func eingefuegtBlendetNachDerDauerAus() async throws {
     let coordinator = DictationCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
                                            client: client, pasteboard: pasteboard,
                                            inserter: inserter, target: target,
+                                           abbruchHotkey: FakeAbbruchHotkey(),
                                            keyDownCounter: FakeKeyDownCounter(),
                                            dauerEingefuegt: .milliseconds(20))
     await coordinator.start()
@@ -1717,6 +1721,7 @@ func neuesDiktatBrichtDenAusblendTimerAb() async throws {
     let coordinator = DictationCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
                                            client: client, pasteboard: pasteboard,
                                            inserter: inserter, target: target,
+                                           abbruchHotkey: FakeAbbruchHotkey(),
                                            keyDownCounter: FakeKeyDownCounter(),
                                            dauerZwischenablage: dauerZwischenablage)
     await coordinator.start()
