@@ -57,7 +57,8 @@ struct TypeLessApp: App {
             client: client,
             pasteboard: SystemPasteboard(),
             inserter: CGEventTextInserter(),
-            target: AXInsertionTarget())
+            target: AXInsertionTarget(),
+            abbruchHotkey: SystemAbbruchHotkey())
 
         _state = State(wrappedValue: state)
         _dictation = State(wrappedValue: dictation)

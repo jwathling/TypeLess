@@ -132,8 +132,13 @@ unten) und landet dabei **zusätzlich immer** in der Zwischenablage (Netz, ⌘V 
 Text); nur wenn eine der vier Bedingungen fürs direkte Einfügen fehlt, bleibt es bei der
 Zwischenablage allein. Ein Tastendruck bei gehaltenem Fn bricht das Diktat ab — das Overlay
 meldet „Abgebrochen", aber **nur** oberhalb der Audio-Mindestmenge (sonst bliebe ein normales
-Fn+Pfeil kommentarlos). Bewusste Entscheidung des Anwenders: ein kleines Overlay unten mittig auf
-dem Bildschirm zeigt den Verlauf **nur während des Diktats** — Live-Pegel beim Zuhören, Verarbeitung,
+Fn+Pfeil kommentarlos). Während der **Verarbeitung** bricht **Escape** ab (Overlay: „Abgebrochen";
+die Zwischenablage bleibt dabei unangetastet — anders als bei einem geglückten Diktat, das dort
+immer ein Netz ablegt). Der Hotkey ist **nur** für die Dauer der Verarbeitung registriert, damit
+Escape sonst nicht systemweit blockiert ist; **bekannte Grenze:** Poppt in diesen ~6 s ein Dialog
+auf, den man mit Escape schließen will, bricht man stattdessen das Diktat ab. Bewusste Entscheidung
+des Anwenders: ein kleines Overlay unten mittig auf dem Bildschirm zeigt den Verlauf **nur während
+des Diktats** — Live-Pegel beim Zuhören, Verarbeitung,
 Ergebnis; eine Textvorschau erscheint dabei ausschließlich, wenn der Text in der Zwischenablage
 landet (nie beim direkten Einfügen — der Text steht ja schon im Feld). **Weiterhin keine Töne.**
 Das Menüleisten-Symbol bleibt als zusätzliche Rückmeldung. Voraussetzung: Systemeinstellungen →
@@ -276,6 +281,25 @@ Systemdiktat, poppt bei jedem Diktat der Emoji-Picker auf — die App weist im M
   **Kommandos** statt als Text — `CGEventTextInserter` postet dabei aber ausschließlich
   `virtualKey: 0`, nie den Leertasten-Keycode (49), Play/Pause & Co. bleiben also außen vor
   (s. Spec, Restrisiko 4).
+- [x] **Diktat abbrechen (Verarbeitungsphase).** Bis dahin ließ sich ein Diktat nur **beim
+  Sprechen** verwerfen (Taste bei gehaltenem Fn); in den ~6 s Verarbeitung gab es **keinen** Weg.
+  Jetzt bricht **Escape** dort ab: `Task.cancel()` auf die jüngste Verarbeitung, Zustellung
+  `.abgebrochen`, `session` zurück auf `.idle` — **kein Fehler**, kein Warnzeichen, und
+  ausdrücklich **kein Netz** in der Zwischenablage (diesen Text will der Anwender nicht).
+  **Datenschutz:** Der Auslöser ist `RegisterEventHotKey` (Carbon), **kein** Event-Tap — es sieht
+  ausschließlich die angemeldete Kombination, nie andere Tastendrücke. Die Fn-Tap-Maske bleibt
+  unverändert `.flagsChanged`.
+  **Nur zeitweise registriert:** `synchronisiereAbbruchHotkey()` leitet die Registrierung
+  idempotent aus `session` ab, statt sie an einzelne Übergänge zu hängen — es gibt drei Wege aus
+  `.processing` heraus (Zustellung, Fehler, **neues Diktat**), und auf einem vergessenen bliebe
+  Escape systemweit belegt, bis die App beendet wird.
+  **Atomarer Schnitt:** Ein `Task.isCancelled`-Check unmittelbar vor `stelleZu` genügt, weil
+  Zustellung und Zustandswechsel synchron auf dem MainActor laufen — dazwischen liegt kein
+  Suspension-Punkt. Entweder abgebrochen oder zugestellt, nie beides. Ein Escape **nach** diesem
+  Check wird bewusst ignoriert (lieber ein nicht abgebrochenes als ein halb eingefügtes Diktat).
+  **Bewusst akzeptiert:** Die Engine rechnet ihr abgebrochenes Diktat zu Ende (MLX-Generierung ist
+  nicht unterbrechbar), ein direkt folgendes Diktat wartet daher ggf. wenige Sekunden auf den Lock.
+  Escape ist während der Verarbeitung systemweit belegt — s. Grenze unter „Diktieren".
 - [x] **M8-Teil vorgezogen — Prompt-Prefix-Cache** (LLM-Latenz). Der `MLXRefiner` cacht den
   festen 424-Token-Systemprompt **einmal** beim `preload()` und generiert pro Diktat nur den
   kurzen Suffix (Diktattext) gegen diesen KV-Cache; danach wird der Cache auf die Präfixlänge
