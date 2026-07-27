@@ -46,7 +46,16 @@ public enum SessionState: Sendable, Equatable {
 @MainActor
 @Observable
 public final class DictationCoordinator {
-    public private(set) var session: SessionState = .idle
+    /// **`didSet` statt einzelner Aufrufstellen (Critical, Review Task 2):** Eine Aufzählung von
+    /// Aufrufstellen ist die fragile Strategie — bei rund sechzehn `session = …`-Zuweisungen im
+    /// Koordinator übersieht man leicht einen Pfad (belegt: der `catch`-Block in `handlePressed()`
+    /// und die „Hotkey inaktiv"-Closure in `start()` blieben beim ersten Anlauf unsynchronisiert,
+    /// weil beide während `.processing` auf `.failed` springen können, ohne über
+    /// `beendeVerarbeitung` zu laufen). `didSet` kann keinen Pfad vergessen, weil es an der
+    /// Eigenschaft selbst hängt statt an den Stellen, die sie ändern.
+    public private(set) var session: SessionState = .idle {
+        didSet { synchronisiereAbbruchHotkey() }
+    }
 
     /// Was das Overlay gerade anzeigt (s. ``OverlayZustand``). Getrennt von ``session``: Das
     /// Overlay zeigt den Live-Pegel und den erkannten Text, die der ``SessionState`` nicht trägt,
@@ -59,6 +68,8 @@ public final class DictationCoordinator {
     private let pasteboard: Pasteboard
     private let inserter: TextInserter
     private let target: InsertionTarget
+    /// Meldet Escape an, solange verarbeitet wird — der Auslöser für ``brichAb()``.
+    private let abbruchHotkey: AbbruchHotkey
 
     /// Die App, die beim Fn-Druck vorne war — das ZIEL dieses Diktats.
     ///
@@ -137,6 +148,17 @@ public final class DictationCoordinator {
                 pasteboard: Pasteboard,
                 inserter: TextInserter = CGEventTextInserter(),
                 target: InsertionTarget = AXInsertionTarget(),
+                // BEWUSST OHNE DEFAULT — anders als `inserter`/`target` darüber. Ein Default
+                // `SystemAbbruchHotkey()` meldet einen echten, systemweiten Escape-Hotkey an;
+                // in einem Testlauf nimmt das dem ganzen Rechner Escape weg, und zwar
+                // UNSICHTBAR (kein Fenster wird beschrieben, keine Ausgabe erscheint). Genau das
+                // passierte: Als dieser Parameter dazukam, fielen fünf bestehende Proben, die den
+                // Init direkt statt über die Test-Factory aufrufen, still auf den echten Typ
+                // zurück — vier davon durchlaufen `.processing` und registrierten damit wirklich
+                // (nachgemessen). Ohne Default hätte der Compiler sie sofort benannt. Die App
+                // übergibt ihn ohnehin explizit (`TypeLessApp.swift`), der Default hatte also
+                // keinen einzigen Produktionsnutzer.
+                abbruchHotkey: AbbruchHotkey,
                 minimumSampleCount: Int = 4_800,
                 beendenZeitlimit: Duration = .seconds(10),
                 beendenPollIntervall: Duration = .milliseconds(20),
@@ -153,6 +175,7 @@ public final class DictationCoordinator {
         self.pasteboard = pasteboard
         self.inserter = inserter
         self.target = target
+        self.abbruchHotkey = abbruchHotkey
         self.minimumSampleCount = minimumSampleCount
         self.beendenZeitlimit = beendenZeitlimit
         self.beendenPollIntervall = beendenPollIntervall
@@ -249,6 +272,14 @@ public final class DictationCoordinator {
         ausblendTask?.cancel()
         session = .idle
         overlay = .aus
+        // Der `didSet` auf `session` hat das oben bereits erledigt (die Zuweisung auf `.idle`
+        // synchronisiert automatisch). Dieser Aufruf bleibt trotzdem bewusst stehen — nicht als
+        // Zufallsredundanz, sondern als von `session` UNABHÄNGIGE Garantie: Sollte `session` beim
+        // Beenden aus irgendeinem Grund NICHT wechseln (z. B. weil sie schon `.idle` war und ein
+        // künftiger Refactor `didSet` änderungsscharf statt bei jeder Zuweisung feuern lässt), darf
+        // Escape trotzdem nicht auf der Strecke bleiben. Beim Beenden soll es in JEDEM Fall frei
+        // werden, komplett unabhängig vom Mechanismus, der `session` sonst synchronisiert.
+        abbruchHotkey.gibFrei()
     }
 
     private func stopHotkey() {
@@ -533,6 +564,9 @@ public final class DictationCoordinator {
         /// Stille-Gate nichts machen konnte. Es gibt nichts zuzustellen — aber es ist auch kein
         /// geglücktes Diktat.
         case nichtsErkannt
+        /// Der Anwender hat während der Verarbeitung abgebrochen. **Kein Fehler** — und
+        /// ausdrücklich **kein** Netz in der Zwischenablage: Diesen Text will er nicht.
+        case abgebrochen
         case fehler(String)
     }
 
@@ -578,6 +612,22 @@ public final class DictationCoordinator {
                 // Der Text wird in JEDEM Fall zugestellt (eingefügt oder, wenn das nicht sicher
                 // möglich ist, in die Zwischenablage gelegt) — nur `session` folgt ihm ggf. nicht
                 // mehr (s. `beendeVerarbeitung`).
+
+                // DER ATOMARE SCHNITT: Ab hier gibt es kein Zurück. `stelleZu` schreibt die
+                // Zwischenablage und tippt; danach ist der Text beim Anwender. Weil `stelleZu` und
+                // `beendeVerarbeitung` synchron auf dem MainActor laufen, liegt zwischen dieser
+                // Prüfung und der Zustellung **kein Suspension-Punkt** — ein später eintreffender
+                // Abbruch kann also nichts mehr halb erledigen. Entweder abgebrochen oder
+                // zugestellt, nie beides.
+                //
+                // Ehrlich benannt: Ein Escape, das NACH dieser Zeile eintrifft, wird ignoriert und
+                // der Text ist eingefügt. Das ist die sichere Seite — lieber ein nicht
+                // abgebrochenes Diktat als ein halb eingefügtes.
+                if Task.isCancelled {
+                    self?.beendeVerarbeitung(id: id, zustellung: .abgebrochen)
+                    return
+                }
+
                 let zustellung = Self.stelleZu(ergebnis.finalText, zielApp: zielApp,
                                                target: target, inserter: inserter,
                                                pasteboard: pasteboard)
@@ -586,9 +636,31 @@ public final class DictationCoordinator {
                 // Aufruf ist synchron (`beendeVerarbeitung` ist bewusst nicht `async`).
                 self?.beendeVerarbeitung(id: id, zustellung: zustellung)
             } catch {
-                // Echter Fehler (Engine weg, STT-Ausfall): Die Zwischenablage bleibt unangetastet
-                // — der alte Inhalt ist besser als Leere.
-                self?.beendeVerarbeitung(id: id, zustellung: .fehler(Self.beschreibe(error)))
+                // Ein Zweig statt zwei getrennter `catch`-Klauseln (Review-Fix, Critical): Ein
+                // `CancellationError` wird NUR als direkte Folge der eigenen Stornierung geworfen
+                // — an dieser Stelle ist `Task.isCancelled` also immer schon wahr, sobald der
+                // Fehlertyp es wäre. Die Prüfung auf `Task.isCancelled` allein deckt beide Fälle
+                // ab, ohne das Signal zweimal zu kodieren.
+                //
+                // Und genau diese Prüfung ist hier UNVERZICHTBAR, nicht nur Bequemlichkeit: Trifft
+                // der Abbruch die Task, während sie in `receive()` hängt (`HTTPUnixTransport
+                // .roundTrip`, der weit überwiegende Fall — ein Diktat braucht Sekunden, das
+                // `.cancelled`-Fenster in `waitUntilReady` dagegen nur Sub-Millisekunden), löst
+                // `connection.cancel()` den offenen Callback mit einem FEHLER aus, nicht mit
+                // einer Stornierung — Network.framework kennt an dieser Stelle keinen eigenen
+                // Abbruchgrund. Das kommt als `TransportError.unreachable` bzw. `SidecarError
+                // .unreachable` an, NICHT als `CancellationError`. Ohne den `Task.isCancelled`-
+                // Rückfall hätte ein per Escape abgebrochenes Diktat dem Anwender im Regelfall ein
+                // Warndreieck gezeigt — der Abbruchwunsch schlägt die Fehlerursache, wer abbricht,
+                // will keine Fehlermeldung sehen, egal wie der Transport das Verbindungsende nach
+                // außen meldet.
+                if Task.isCancelled {
+                    self?.beendeVerarbeitung(id: id, zustellung: .abgebrochen)
+                } else {
+                    // Echter Fehler (Engine weg, STT-Ausfall): Die Zwischenablage bleibt
+                    // unangetastet — der alte Inhalt ist besser als Leere.
+                    self?.beendeVerarbeitung(id: id, zustellung: .fehler(Self.beschreibe(error)))
+                }
             }
         }
         verarbeitungen[id] = task
@@ -666,6 +738,53 @@ public final class DictationCoordinator {
         }
     }
 
+    /// Hält die Escape-Registrierung im Einklang mit ``session``.
+    ///
+    /// **Bewusst am Ist-Zustand statt an Übergängen — und deshalb an `didSet` von `session`
+    /// gehängt, nicht an einzelne Aufrufstellen (Critical, Review Task 2):** Es gibt mehrere Wege
+    /// aus `.processing` heraus — die Zustellung (`beendeVerarbeitung`), ein neues Diktat
+    /// (`handlePressed` setzt dann `.recording`, ohne dass je eine Zustellung stattfindet) — und
+    /// mehrere Wege auf `.failed`, während `.processing` noch läuft, die NICHT über
+    /// `beendeVerarbeitung` laufen (der `catch`-Block in `handlePressed()`, wenn `recorder.start()`
+    /// für ein NEUES Diktat wirft, während die ALTE Verarbeitung noch offen ist; die „Hotkey
+    /// inaktiv"-Closure in `start()`, falls der Fn-Tap-Stream während `.processing` stirbt — ein
+    /// vom Carbon-Abbruch-Hotkey völlig unabhängiger Mechanismus). Eine Liste von Aufrufstellen
+    /// müsste JEDEN dieser Wege einzeln kennen und pflegen; `didSet` auf `session` kann keinen
+    /// vergessen, weil es an der Eigenschaft selbst hängt, nicht an den Stellen, die sie ändern.
+    /// Diese Methode bleibt deshalb idempotent (fragt nur, ob gerade verarbeitet wird) und wird bei
+    /// **jeder** Zuweisung an `session` aufgerufen — auch bei einer, die den Wert nicht ändert.
+    ///
+    /// Während `.recording` wird **nicht** registriert: Dort verwirft die Fn-als-Modifier-Wache das
+    /// Diktat schon, wenn eine Taste gedrückt wird (s. `handleReleased()`). Für den Anwender ist
+    /// das Verhalten identisch — Escape bricht ab —, nur der Mechanismus unterscheidet sich.
+    private func synchronisiereAbbruchHotkey() {
+        if session == .processing {
+            abbruchHotkey.registriere { [weak self] in
+                Task { @MainActor in self?.brichAb() }
+            }
+        } else {
+            abbruchHotkey.gibFrei()
+        }
+    }
+
+    /// Bricht die **jüngste** laufende Verarbeitung ab (Auslöser: Escape, s.
+    /// ``synchronisiereAbbruchHotkey()``).
+    ///
+    /// Ältere, noch laufende Verarbeitungen bleiben unberührt — sie gehören zu einem früheren
+    /// Diktat, das der Anwender nicht gemeint hat.
+    ///
+    /// Der Abbruch ist kooperativ: `cancel()` schließt über den Transport die HTTP-Verbindung
+    /// (`HTTPUnixTransport.roundTrip` hängt in `withTaskCancellationHandler`), und der
+    /// `isCancelled`-Check in `verarbeite` verhindert die Zustellung. Die **Engine** rechnet ihr
+    /// Diktat trotzdem zu Ende: Die MLX-Generierung läuft in einem Worker-Thread und ist nicht
+    /// unterbrechbar. Ein unmittelbar folgendes Diktat wartet daher ggf. wenige Sekunden auf den
+    /// Lock des Sidecars — tolerierbar, und der Preis dafür, keinen serverseitigen Abbruch zu
+    /// brauchen.
+    private func brichAb() {
+        guard session == .processing, let id = juengsteVerarbeitung else { return }
+        verarbeitungen[id]?.cancel()
+    }
+
     /// Setzt den Zustand nach einer Verarbeitung — aber **nur**, wenn sie erstens noch die
     /// JÜNGSTE ist (Finding 3, Review zu Task 4) und zweitens der Nutzer nicht inzwischen schon
     /// wieder aufnimmt. Beide Prüfungen sind unabhängig voneinander nötig:
@@ -698,6 +817,10 @@ public final class DictationCoordinator {
             session = .failed("Nichts erkannt")
             overlay = .fehler("Nichts erkannt")
             blendeAusNach(dauerFehler)
+        case .abgebrochen:
+            session = .idle
+            overlay = .abgebrochen
+            blendeAusNach(dauerAbgebrochen)
         case let .fehler(grund):
             session = .failed(grund)
             overlay = .fehler(grund)

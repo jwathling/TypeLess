@@ -297,6 +297,7 @@ func makeCoordinator(hotkey: HotkeyMonitor, recorder: AudioRecorder,
                      client: SidecarClient, pasteboard: Pasteboard,
                      inserter: TextInserter = SpyInserter(),
                      target: InsertionTarget = FakeTarget(),
+                     abbruchHotkey: AbbruchHotkey = FakeAbbruchHotkey(),
                      keyDownCounter: KeyDownCounter = FakeKeyDownCounter(),
                      aufnahmeObergrenze: Duration = .seconds(120)) -> DictationCoordinator {
     // Auf Protokolltypen verbreitert (statt der konkreten Attrappen `FakeRecorder`/
@@ -313,8 +314,12 @@ func makeCoordinator(hotkey: HotkeyMonitor, recorder: AudioRecorder,
     // `CGEventTextInserter`/`AXInsertionTarget`: Sonst würde ein Testlauf tatsächlich Text in das
     // gerade vorderste Fenster tippen (in der Regel das Terminal, in dem `swift test` läuft) und
     // die Weiche „darf getippt werden?" hinge am Rechtezustand der Maschine.
+    //
+    // `abbruchHotkey` Default `FakeAbbruchHotkey()` — NIE `SystemAbbruchHotkey()`: Der würde einen
+    // echten, systemweiten Escape-Hotkey anmelden und dem ganzen Testrechner Escape wegnehmen.
     DictationCoordinator(hotkey: hotkey, recorder: recorder, client: client, pasteboard: pasteboard,
                          inserter: inserter, target: target,
+                         abbruchHotkey: abbruchHotkey,
                          aufnahmeObergrenze: aufnahmeObergrenze,
                          keyDownCounter: keyDownCounter)
 }
@@ -832,6 +837,7 @@ func stopGibtBeiEinerHaengendenVerarbeitungNachDemZeitlimitAufOhneSieAbzubrechen
     let coordinator = DictationCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
                                            client: client, pasteboard: pasteboard,
                                            inserter: inserter, target: FakeTarget(),
+                                           abbruchHotkey: FakeAbbruchHotkey(),
                                            beendenZeitlimit: .milliseconds(50),
                                            beendenPollIntervall: .milliseconds(5),
                                            keyDownCounter: FakeKeyDownCounter())
@@ -1584,6 +1590,7 @@ func pegelLandetWaehrendDerAufnahmeImOverlay() async throws {
     let coordinator = DictationCoordinator(hotkey: hotkey, recorder: recorder, client: client,
                                            pasteboard: pasteboard, inserter: SpyInserter(),
                                            target: FakeTarget(),
+                                           abbruchHotkey: FakeAbbruchHotkey(),
                                            keyDownCounter: FakeKeyDownCounter(),
                                            pegelIntervall: .milliseconds(2))
     await coordinator.start()
@@ -1622,7 +1629,8 @@ func pegelPollFragtNachDerVerarbeitungNichtMehrBeimRecorderAn() async throws {
     let client = GatedDictationClient()
     let coordinator = DictationCoordinator(hotkey: hotkey, recorder: recorder, client: client,
                                            pasteboard: pasteboard, inserter: inserter,
-                                           target: target, keyDownCounter: FakeKeyDownCounter(),
+                                           target: target, abbruchHotkey: FakeAbbruchHotkey(),
+                                           keyDownCounter: FakeKeyDownCounter(),
                                            pegelIntervall: .milliseconds(2))
     await coordinator.start()
 
@@ -1672,6 +1680,7 @@ func eingefuegtBlendetNachDerDauerAus() async throws {
     let coordinator = DictationCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
                                            client: client, pasteboard: pasteboard,
                                            inserter: inserter, target: target,
+                                           abbruchHotkey: FakeAbbruchHotkey(),
                                            keyDownCounter: FakeKeyDownCounter(),
                                            dauerEingefuegt: .milliseconds(20))
     await coordinator.start()
@@ -1712,6 +1721,7 @@ func neuesDiktatBrichtDenAusblendTimerAb() async throws {
     let coordinator = DictationCoordinator(hotkey: hotkey, recorder: FakeRecorder(samples: sprache()),
                                            client: client, pasteboard: pasteboard,
                                            inserter: inserter, target: target,
+                                           abbruchHotkey: FakeAbbruchHotkey(),
                                            keyDownCounter: FakeKeyDownCounter(),
                                            dauerZwischenablage: dauerZwischenablage)
     await coordinator.start()
@@ -1960,4 +1970,332 @@ func kurzesFnPlusTasteMeldetNichts() async {
     await warteBis { coordinator.session == .idle }
 
     #expect(coordinator.overlay == .aus, "kurzes Fn+Pfeil bleibt kommentarlos")
+}
+
+// MARK: - Abbruch-Hotkey: Registrierung folgt dem Zustand
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func derAbbruchHotkeyIstNurWaehrendDerVerarbeitungRegistriert() async {
+    // Escape ist eine systemweit belegte Taste, solange der Hotkey angemeldet ist — jede andere
+    // App bekommt sie dann nicht. Deshalb darf er ausschließlich während der Verarbeitung
+    // registriert sein: nicht im Leerlauf, nicht beim Aufnehmen, und danach wieder frei.
+    let hotkey = FakeHotkey()
+    let recorder = FakeRecorder(samples: sprache())
+    let client = GatedDictationClient()
+    let abbruch = FakeAbbruchHotkey()
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: recorder, client: client,
+                                     pasteboard: SpyPasteboard(), abbruchHotkey: abbruch)
+    await coordinator.start()
+    #expect(abbruch.istRegistriert == false, "im Leerlauf muss Escape frei sein")
+
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    #expect(abbruch.istRegistriert == false,
+            "beim Sprechen erledigt die Fn-als-Modifier-Wache den Abbruch — kein Hotkey nötig")
+
+    hotkey.send(.released)
+    await warteBis { coordinator.session == .processing }
+    #expect(abbruch.istRegistriert, "während der Verarbeitung muss Escape belegt sein")
+
+    // Erst wenn `process()` seine Continuation registriert hat, darf `freigeben()` sie auflösen —
+    // sonst liefe der Aufruf ins Leere (gleiches Wettlauf-Risiko wie bei Regel 6, s. dort): Ohne
+    // diese Synchronisation kann `session == .processing` schon wahr sein, bevor die neu erzeugte
+    // Verarbeitungs-Task überhaupt zum Laufen kam — `freigeben()` fände dann keine wartende
+    // Continuation, und die Verarbeitung hinge für immer.
+    var iterator = client.processGestartet.makeAsyncIterator()
+    _ = await iterator.next()
+    client.freigeben(mit: .success(ergebnis("Hallo")))
+    await warteBis { coordinator.session == .idle }
+    #expect(abbruch.istRegistriert == false, "nach der Zustellung muss Escape wieder frei sein")
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func derAbbruchHotkeyWirdAuchNachEinemFehlerFreigegeben() async {
+    // Der teuerste Fehler dieser Task: ein Hotkey, der auf einem Fehlerpfad hängen bleibt. Escape
+    // wäre dann bis zum Beenden der App systemweit blockiert — ohne dass der Anwender ahnt, warum.
+    let hotkey = FakeHotkey()
+    let recorder = FakeRecorder(samples: sprache())
+    let client = DictationClient(ergebnis: .failure(.unreachable))
+    let abbruch = FakeAbbruchHotkey()
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: recorder, client: client,
+                                     pasteboard: SpyPasteboard(), abbruchHotkey: abbruch)
+    await coordinator.start()
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+
+    await warteBis { if case .failed = coordinator.session { return true } else { return false } }
+
+    #expect(abbruch.istRegistriert == false, "auch nach einem Fehler muss Escape frei werden")
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func einNeuesDiktatWaehrendDerVerarbeitungGibtDenHotkeyFrei() async {
+    // Der Pfad, den `beendeVerarbeitung` NICHT sieht: Drückt der Anwender während der Verarbeitung
+    // erneut Fn, wechselt `session` von `.processing` auf `.recording`, ohne dass eine Zustellung
+    // stattfindet. Würde die Freigabe nur in `beendeVerarbeitung` stehen, blieb Escape belegt.
+    let hotkey = FakeHotkey()
+    let recorder = FakeRecorder(samples: sprache())
+    let client = GatedDictationClient()
+    let abbruch = FakeAbbruchHotkey()
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: recorder, client: client,
+                                     pasteboard: SpyPasteboard(), abbruchHotkey: abbruch)
+    await coordinator.start()
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+    await warteBis { coordinator.session == .processing }
+    #expect(abbruch.istRegistriert)
+
+    hotkey.send(.pressed)   // neues Diktat, alte Verarbeitung läuft weiter
+    await warteBis { coordinator.session == .recording }
+
+    #expect(abbruch.istRegistriert == false,
+            "beim Wechsel zurück ins Aufnehmen muss Escape freigegeben werden")
+    client.freigeben(mit: .success(ergebnis("Hallo")))   // die offene Verarbeitung auflösen
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func einFehlerBeimZweitenStartWaehrendDerVerarbeitungGibtDenHotkeyFrei() async {
+    // Critical, Review Task 2: Ein Pfad, den die vier ursprünglichen Aufrufstellen NICHT
+    // abdeckten. Drückt der Anwender Fn für ein NEUES Diktat, während die ALTE Verarbeitung noch
+    // offen ist, und `recorder.start()` wirft (Mikrofonzugriff entzogen, AVAudioEngine-Fehler —
+    // beides dokumentierte, echte Fälle), landet `handlePressed()`s `catch`-Block bei
+    // `session = .failed(...)`, OHNE je über `beendeVerarbeitung` zu laufen. Die vier
+    // Aufrufstellen aus dem ursprünglichen Brief kannten diesen Pfad nicht — Escape wäre bis zum
+    // Beenden der App systemweit blockiert geblieben. Der `didSet` auf `session` schließt ihn,
+    // weil er an der Eigenschaft selbst hängt statt an den Stellen, die sie ändern.
+    let hotkey = FakeHotkey()
+    let recorder = FakeRecorder(samples: sprache())
+    let client = GatedDictationClient()
+    let abbruch = FakeAbbruchHotkey()
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: recorder, client: client,
+                                     pasteboard: SpyPasteboard(), abbruchHotkey: abbruch)
+    await coordinator.start()
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+    await warteBis { coordinator.session == .processing }
+    #expect(abbruch.istRegistriert, "während der (noch offenen) Verarbeitung muss Escape belegt sein")
+
+    // Ab jetzt soll der NÄCHSTE `start()` scheitern — die ALTE Verarbeitung bleibt bewusst offen,
+    // damit der Fehler mitten in `.processing` einschlägt.
+    await recorder.setFehlerBeimStart(.microphoneDenied)
+    hotkey.send(.pressed)
+    await warteBis { if case .failed = coordinator.session { return true } else { return false } }
+
+    #expect(abbruch.istRegistriert == false,
+            "ein gescheiterter Neustart während laufender Verarbeitung muss Escape freigeben")
+    client.freigeben(mit: .success(ergebnis("Hallo")))   // die noch offene Verarbeitung auflösen
+}
+
+// MARK: - Abbruch während der Verarbeitung
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func escapeWaehrendDerVerarbeitungBrichtAbUndStelltNichtsZu() async {
+    // Der Kern dieser Spec: Der Anwender merkt „das war Quatsch" und drückt Escape in den ~6 s
+    // Verarbeitung. Nichts darf getippt werden, und die Zwischenablage muss ihren alten Inhalt
+    // behalten — anders als bei einem geglückten Diktat, das dort immer ein Netz ablegt.
+    let hotkey = FakeHotkey()
+    let recorder = FakeRecorder(samples: sprache())
+    let client = GatedDictationClient()
+    let abbruch = FakeAbbruchHotkey()
+    let inserter = SpyInserter()
+    let pasteboard = SpyPasteboard()
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: recorder, client: client,
+                                      pasteboard: pasteboard, inserter: inserter,
+                                      abbruchHotkey: abbruch)
+    await coordinator.start()
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+
+    // Auf `processGestartet` warten, BEVOR freigegeben wird: Sonst läuft die Freigabe, bevor die
+    // Verarbeitungs-Task ihre Continuation angemeldet hat — ein deterministischer Wettlauf (in
+    // Task 2 mit genau diesem Fehler 5/5 rot). Gleiches Muster wie bei den bestehenden
+    // `GatedDictationClient`-Proben in dieser Datei.
+    var iterator = client.processGestartet.makeAsyncIterator()
+    hotkey.send(.released)
+    _ = await iterator.next()
+    await warteBis { coordinator.session == .processing }
+
+    abbruch.druecke()                                            // Escape
+    // Danach trotzdem freigeben: `process` hängt in `withCheckedContinuation`, das auf `cancel()`
+    // nicht reagiert. Die Task läuft erst weiter, wenn die Engine antwortet — und trifft dann den
+    // `isCancelled`-Check. Genau dieser Ablauf entspricht der Realität: Die Engine rechnet ihr
+    // Diktat zu Ende, das Ergebnis wird verworfen.
+    client.freigeben(mit: .success(ergebnis("darf nie ankommen")))
+    await warteBis { coordinator.overlay == .abgebrochen }
+
+    #expect(coordinator.session == .idle, "ein Abbruch ist kein Fehler")
+    #expect(coordinator.overlay == .abgebrochen)
+    #expect(inserter.getippt.isEmpty, "es darf nichts getippt werden")
+    #expect(pasteboard.geschrieben.isEmpty,
+            "bei Abbruch bleibt die Zwischenablage unangetastet — kein Netz")
+    #expect(abbruch.istRegistriert == false, "nach dem Abbruch muss Escape wieder frei sein")
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func einVerspaeteterEscapeNachSessionWechselBrichtDieAlteVerarbeitungNicht() async {
+    // Ersetzt die frühere `escapeOhneLaufendeVerarbeitungIstFolgenlos` (I3, Abschluss-Review): Die
+    // alte Probe drückte Escape an einer NICHT registrierten Attrappe — deren Callback ist dann
+    // `nil`, es lief also gar kein Produktionscode, die Probe wäre auch grün gewesen, wenn
+    // `brichAb()` gar keinen Guard hätte (oder gar nicht existierte). Sie duplizierte damit nur
+    // `einDruckOhneRegistrierungIstFolgenlos` (`AbbruchHotkeyTests.swift`), das dieselbe
+    // Attrappen-Eigenschaft schon prüft.
+    //
+    // Diese Probe bildet stattdessen das SZENARIO nach, vor dem der Guard
+    // `guard session == .processing, let id = juengsteVerarbeitung else { return }`
+    // (`DictationCoordinator.brichAb()`) tatsächlich schützt: Die Callback-Closure aus
+    // `synchronisiereAbbruchHotkey()` springt über `Task { @MainActor in … }`
+    // (`DictationCoordinator.swift:753`) — in diesem Sprung kann `session` bereits weitergezogen
+    // sein. `FakeAbbruchHotkey.druckeVerspaetet()` ruft genau den Callback von Diktat A auf,
+    // NACHDEM ein zweites Fn `session` längst auf `.recording` gesetzt und Escape (via `gibFrei()`)
+    // wieder freigegeben hat — `juengsteVerarbeitung` zeigt dabei aber weiterhin auf A, weil B
+    // seine eigene Verarbeitung erst nach dem `.released` unten anmeldet. Ohne den
+    // `session == .processing`-Teil des Guards würde dieser verspätete Aufruf
+    // `verarbeitungen[A.id]?.cancel()` auslösen, obwohl der Anwender längst wieder aufnimmt — A
+    // käme dann nie an, ohne jede Rückmeldung und ohne Netz in der Zwischenablage.
+    let hotkey = FakeHotkey()
+    let recorder = FakeRecorder(samples: sprache())
+    let client = GatedDictationClient()
+    let abbruch = FakeAbbruchHotkey()
+    let inserter = SpyInserter()
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: recorder, client: client,
+                                      pasteboard: SpyPasteboard(), inserter: inserter,
+                                      abbruchHotkey: abbruch)
+    await coordinator.start()
+    var iterator = client.processGestartet.makeAsyncIterator()
+
+    // Diktat A -> Verarbeitung läuft (torgesteuert), Escape ist registriert; `juengsteVerarbeitung`
+    // zeigt auf A.
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+    _ = await iterator.next()
+    await warteBis { coordinator.session == .processing }
+    #expect(abbruch.istRegistriert)
+
+    // Zweites Fn drücken, WÄHREND A noch offen ist: `session` wechselt auf `.recording`, das
+    // `didSet` gibt Escape frei (gleiches Muster wie
+    // `einNeuesDiktatWaehrendDerVerarbeitungGibtDenHotkeyFrei`) — `juengsteVerarbeitung` bleibt
+    // dabei A, solange B noch nicht selbst in Verarbeitung geht.
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    #expect(abbruch.istRegistriert == false)
+
+    // Der verspätete Escape trifft jetzt ein.
+    abbruch.druckeVerspaetet()
+    await Task.yield()
+
+    #expect(coordinator.session == .recording, "B läuft ungestört weiter — kein Zustand umgeworfen")
+    #expect(coordinator.overlay != .abgebrochen, "kein Abbruch darf sichtbar werden")
+
+    // B zu Ende bringen; beide Verarbeitungen auflösen (FIFO: A zuerst, weil zuerst gestartet).
+    hotkey.send(.released)
+    _ = await iterator.next()
+    await warteBis { coordinator.session == .processing }
+    client.freigeben(mit: .success(ergebnis("A")))
+    client.freigeben(mit: .success(ergebnis("B")))
+    await warteBis { inserter.getippt.contains("A") && inserter.getippt.contains("B") }
+
+    #expect(inserter.getippt.contains("A"),
+            "A muss trotz des verspäteten Escapes ganz normal zustellen — der Guard hat sie geschützt")
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func derAbbruchTrifftNurDieJuengsteVerarbeitung() async {
+    // Läuft noch eine ältere Verarbeitung, gehört sie zu einem früheren Diktat, das der Anwender
+    // nicht gemeint hat. Escape bezieht sich auf das, dessen Overlay er gerade sieht — die ältere
+    // muss ungestört zu Ende laufen und ihren Text zustellen.
+    //
+    // Die Freigabe des torgesteuerten Clients ist FIFO: Der erste `freigeben`-Aufruf löst die
+    // ÄLTERE Verarbeitung auf, der zweite die jüngere. Unterschiedliche Texte machen sichtbar,
+    // welche von beiden zugestellt hat.
+    let hotkey = FakeHotkey()
+    let recorder = FakeRecorder(samples: sprache())
+    let client = GatedDictationClient()
+    let abbruch = FakeAbbruchHotkey()
+    let inserter = SpyInserter()
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: recorder, client: client,
+                                      pasteboard: SpyPasteboard(), inserter: inserter,
+                                      abbruchHotkey: abbruch)
+    await coordinator.start()
+    // Auf `processGestartet` warten, jeweils VOR der zugehörigen Freigabe weiter unten — gleiches
+    // Muster wie oben, hier zweimal für die zwei parallelen Verarbeitungen.
+    var iterator = client.processGestartet.makeAsyncIterator()
+    // Erstes Diktat -> Verarbeitung läuft (torgesteuert, antwortet noch nicht)
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+    _ = await iterator.next()
+    await warteBis { coordinator.session == .processing }
+    // Zweites Diktat -> wird die jüngste Verarbeitung
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+    _ = await iterator.next()
+    await warteBis { coordinator.session == .processing }
+
+    abbruch.druecke()                                       // trifft die JÜNGERE
+    client.freigeben(mit: .success(ergebnis("Erstes")))     // FIFO: die ältere
+    client.freigeben(mit: .success(ergebnis("Zweites")))    // die jüngere, abgebrochen
+    await warteBis { coordinator.overlay == .abgebrochen }
+
+    #expect(coordinator.session == .idle)
+    #expect(inserter.getippt == ["Erstes"],
+            "die ältere Verarbeitung darf NICHT mitabgebrochen werden — sie stellt zu")
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func escapeWaehrendDerVerarbeitungBleibtAuchDannAbbruchWennDerTransportEinenFehlerWirft() async {
+    // Critical, Review Task 3: `GatedDictationClient` in den beiden Proben oben löst bei einer
+    // ERFOLGREICHEN Freigabe auf — genau dann greift der `isCancelled`-Check VOR `stelleZu`
+    // („der atomare Schnitt"), aber NIE der `catch`-Zweig der Verarbeitungs-Task. Der echte
+    // Transport (`HTTPUnixTransport.roundTrip`) verhält sich beim Abbruch WÄHREND `receive()`
+    // hängt (der weit überwiegende Fall — ein Diktat braucht Sekunden) anders: `connection
+    // .cancel()` löst den offenen Callback mit einem FEHLER auf (`TransportError.unreachable` →
+    // `SidecarError.unreachable`), NICHT mit `CancellationError` — Network.framework kennt an
+    // dieser Stelle keinen eigenen Abbruchgrund. Nur das `.cancelled`-Fenster in `waitUntilReady`
+    // (Sub-Millisekunden) wirft echtes `CancellationError`, das wird bei einem Abbruch nach
+    // Sekunden realistischer Verarbeitungsdauer praktisch nie getroffen.
+    //
+    // Diese Probe bildet genau das nach: nach dem Abbruch wird mit einem FEHLER statt einem
+    // Erfolg freigegeben — damit wirft `process()` wie in Produktion, und der `catch`-Zweig
+    // (nicht der atomare Schnitt) muss die Abbruch-Erkennung leisten.
+    let hotkey = FakeHotkey()
+    let recorder = FakeRecorder(samples: sprache())
+    let client = GatedDictationClient()
+    let abbruch = FakeAbbruchHotkey()
+    let inserter = SpyInserter()
+    let pasteboard = SpyPasteboard()
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: recorder, client: client,
+                                      pasteboard: pasteboard, inserter: inserter,
+                                      abbruchHotkey: abbruch)
+    await coordinator.start()
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+
+    var iterator = client.processGestartet.makeAsyncIterator()
+    hotkey.send(.released)
+    _ = await iterator.next()
+    await warteBis { coordinator.session == .processing }
+
+    abbruch.druecke()                                            // Escape
+    client.freigeben(mit: .failure(.unreachable))                // wie beim echten Transport
+    await warteBis { coordinator.overlay == .abgebrochen }
+
+    #expect(coordinator.session == .idle, "ein Abbruch ist kein Fehler — auch nicht bei dieser Fehlerform")
+    #expect(coordinator.overlay == .abgebrochen, "kein Warndreieck für einen gewollten Abbruch")
+    #expect(inserter.getippt.isEmpty, "es darf nichts getippt werden")
+    #expect(pasteboard.geschrieben.isEmpty,
+            "bei Abbruch bleibt die Zwischenablage unangetastet — kein Netz")
+    #expect(abbruch.istRegistriert == false, "nach dem Abbruch muss Escape wieder frei sein")
 }

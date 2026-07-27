@@ -34,6 +34,13 @@ actor FakeRecorder: AudioRecorder {
     /// Legt fest, was `aktuellerPegel()` liefert, solange die Attrappe `laeuft == true` ist.
     func setzePegel(_ neuer: Float) { pegel = neuer }
 
+    /// Legt NACH der Konstruktion fest, dass der NÄCHSTE `start()` scheitert — anders als der
+    /// feste `fehlerBeimStart` im `init`, der JEDEN Aufruf träfe. Nötig, um einen Fehler gezielt
+    /// erst beim ZWEITEN `start()` auszulösen, während eine erste, erfolgreich gestartete
+    /// Aufnahme/Verarbeitung noch läuft (Critical, Review Task 2: `handlePressed()`s `catch`-Block
+    /// für ein neues Diktat, während die alte Verarbeitung noch offen ist).
+    func setFehlerBeimStart(_ fehler: AudioRecorderError?) { fehlerBeimStart = fehler }
+
     func start() async throws {
         startCount += 1
         // C1 (Review M4, Critical): Bildet denselben Vertrag nach, den `AVAudioEngineRecorder`
