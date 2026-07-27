@@ -297,6 +297,7 @@ func makeCoordinator(hotkey: HotkeyMonitor, recorder: AudioRecorder,
                      client: SidecarClient, pasteboard: Pasteboard,
                      inserter: TextInserter = SpyInserter(),
                      target: InsertionTarget = FakeTarget(),
+                     abbruchHotkey: AbbruchHotkey = FakeAbbruchHotkey(),
                      keyDownCounter: KeyDownCounter = FakeKeyDownCounter(),
                      aufnahmeObergrenze: Duration = .seconds(120)) -> DictationCoordinator {
     // Auf Protokolltypen verbreitert (statt der konkreten Attrappen `FakeRecorder`/
@@ -313,8 +314,12 @@ func makeCoordinator(hotkey: HotkeyMonitor, recorder: AudioRecorder,
     // `CGEventTextInserter`/`AXInsertionTarget`: Sonst würde ein Testlauf tatsächlich Text in das
     // gerade vorderste Fenster tippen (in der Regel das Terminal, in dem `swift test` läuft) und
     // die Weiche „darf getippt werden?" hinge am Rechtezustand der Maschine.
+    //
+    // `abbruchHotkey` Default `FakeAbbruchHotkey()` — NIE `SystemAbbruchHotkey()`: Der würde einen
+    // echten, systemweiten Escape-Hotkey anmelden und dem ganzen Testrechner Escape wegnehmen.
     DictationCoordinator(hotkey: hotkey, recorder: recorder, client: client, pasteboard: pasteboard,
                          inserter: inserter, target: target,
+                         abbruchHotkey: abbruchHotkey,
                          aufnahmeObergrenze: aufnahmeObergrenze,
                          keyDownCounter: keyDownCounter)
 }
@@ -1960,4 +1965,90 @@ func kurzesFnPlusTasteMeldetNichts() async {
     await warteBis { coordinator.session == .idle }
 
     #expect(coordinator.overlay == .aus, "kurzes Fn+Pfeil bleibt kommentarlos")
+}
+
+// MARK: - Abbruch-Hotkey: Registrierung folgt dem Zustand
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func derAbbruchHotkeyIstNurWaehrendDerVerarbeitungRegistriert() async {
+    // Escape ist eine systemweit belegte Taste, solange der Hotkey angemeldet ist — jede andere
+    // App bekommt sie dann nicht. Deshalb darf er ausschließlich während der Verarbeitung
+    // registriert sein: nicht im Leerlauf, nicht beim Aufnehmen, und danach wieder frei.
+    let hotkey = FakeHotkey()
+    let recorder = FakeRecorder(samples: sprache())
+    let client = GatedDictationClient()
+    let abbruch = FakeAbbruchHotkey()
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: recorder, client: client,
+                                     pasteboard: SpyPasteboard(), abbruchHotkey: abbruch)
+    await coordinator.start()
+    #expect(abbruch.istRegistriert == false, "im Leerlauf muss Escape frei sein")
+
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    #expect(abbruch.istRegistriert == false,
+            "beim Sprechen erledigt die Fn-als-Modifier-Wache den Abbruch — kein Hotkey nötig")
+
+    hotkey.send(.released)
+    await warteBis { coordinator.session == .processing }
+    #expect(abbruch.istRegistriert, "während der Verarbeitung muss Escape belegt sein")
+
+    // Erst wenn `process()` seine Continuation registriert hat, darf `freigeben()` sie auflösen —
+    // sonst liefe der Aufruf ins Leere (gleiches Wettlauf-Risiko wie bei Regel 6, s. dort): Ohne
+    // diese Synchronisation kann `session == .processing` schon wahr sein, bevor die neu erzeugte
+    // Verarbeitungs-Task überhaupt zum Laufen kam — `freigeben()` fände dann keine wartende
+    // Continuation, und die Verarbeitung hinge für immer.
+    var iterator = client.processGestartet.makeAsyncIterator()
+    _ = await iterator.next()
+    client.freigeben(mit: .success(ergebnis("Hallo")))
+    await warteBis { coordinator.session == .idle }
+    #expect(abbruch.istRegistriert == false, "nach der Zustellung muss Escape wieder frei sein")
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func derAbbruchHotkeyWirdAuchNachEinemFehlerFreigegeben() async {
+    // Der teuerste Fehler dieser Task: ein Hotkey, der auf einem Fehlerpfad hängen bleibt. Escape
+    // wäre dann bis zum Beenden der App systemweit blockiert — ohne dass der Anwender ahnt, warum.
+    let hotkey = FakeHotkey()
+    let recorder = FakeRecorder(samples: sprache())
+    let client = DictationClient(ergebnis: .failure(.unreachable))
+    let abbruch = FakeAbbruchHotkey()
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: recorder, client: client,
+                                     pasteboard: SpyPasteboard(), abbruchHotkey: abbruch)
+    await coordinator.start()
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+
+    await warteBis { if case .failed = coordinator.session { return true } else { return false } }
+
+    #expect(abbruch.istRegistriert == false, "auch nach einem Fehler muss Escape frei werden")
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func einNeuesDiktatWaehrendDerVerarbeitungGibtDenHotkeyFrei() async {
+    // Der Pfad, den `beendeVerarbeitung` NICHT sieht: Drückt der Anwender während der Verarbeitung
+    // erneut Fn, wechselt `session` von `.processing` auf `.recording`, ohne dass eine Zustellung
+    // stattfindet. Würde die Freigabe nur in `beendeVerarbeitung` stehen, blieb Escape belegt.
+    let hotkey = FakeHotkey()
+    let recorder = FakeRecorder(samples: sprache())
+    let client = GatedDictationClient()
+    let abbruch = FakeAbbruchHotkey()
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: recorder, client: client,
+                                     pasteboard: SpyPasteboard(), abbruchHotkey: abbruch)
+    await coordinator.start()
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+    await warteBis { coordinator.session == .processing }
+    #expect(abbruch.istRegistriert)
+
+    hotkey.send(.pressed)   // neues Diktat, alte Verarbeitung läuft weiter
+    await warteBis { coordinator.session == .recording }
+
+    #expect(abbruch.istRegistriert == false,
+            "beim Wechsel zurück ins Aufnehmen muss Escape freigegeben werden")
+    client.freigeben(mit: .success(ergebnis("Hallo")))   // die offene Verarbeitung auflösen
 }

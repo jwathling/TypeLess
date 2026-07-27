@@ -59,6 +59,8 @@ public final class DictationCoordinator {
     private let pasteboard: Pasteboard
     private let inserter: TextInserter
     private let target: InsertionTarget
+    /// Meldet Escape an, solange verarbeitet wird — der Auslöser für ``brichAb()``.
+    private let abbruchHotkey: AbbruchHotkey
 
     /// Die App, die beim Fn-Druck vorne war — das ZIEL dieses Diktats.
     ///
@@ -137,6 +139,7 @@ public final class DictationCoordinator {
                 pasteboard: Pasteboard,
                 inserter: TextInserter = CGEventTextInserter(),
                 target: InsertionTarget = AXInsertionTarget(),
+                abbruchHotkey: AbbruchHotkey = SystemAbbruchHotkey(),
                 minimumSampleCount: Int = 4_800,
                 beendenZeitlimit: Duration = .seconds(10),
                 beendenPollIntervall: Duration = .milliseconds(20),
@@ -153,6 +156,7 @@ public final class DictationCoordinator {
         self.pasteboard = pasteboard
         self.inserter = inserter
         self.target = target
+        self.abbruchHotkey = abbruchHotkey
         self.minimumSampleCount = minimumSampleCount
         self.beendenZeitlimit = beendenZeitlimit
         self.beendenPollIntervall = beendenPollIntervall
@@ -249,6 +253,9 @@ public final class DictationCoordinator {
         ausblendTask?.cancel()
         session = .idle
         overlay = .aus
+        // Bewusst der direkte Aufruf statt `synchronisiereAbbruchHotkey()`: Beim Beenden soll
+        // Escape in JEDEM Fall frei werden, unabhängig davon, welchen Wert `session` gerade trägt.
+        abbruchHotkey.gibFrei()
     }
 
     private func stopHotkey() {
@@ -413,6 +420,7 @@ public final class DictationCoordinator {
         Task { [client] in try? await client.preload() }
 
         session = .recording
+        synchronisiereAbbruchHotkey()
         // Task 4 (Diktat-Overlay): Ein neues Diktat räumt einen noch laufenden Ausblend-Timer
         // eines VORHERIGEN Diktats sofort weg — sonst würde der alte Timer gleich darauf dieses
         // frische Overlay wieder auf `.aus` ziehen.
@@ -516,6 +524,7 @@ public final class DictationCoordinator {
         }
 
         session = .processing
+        synchronisiereAbbruchHotkey()
         overlay = .verarbeitet
         verarbeite(samples, zielApp: zielAppBeimDruck)
     }
@@ -666,6 +675,32 @@ public final class DictationCoordinator {
         }
     }
 
+    /// Hält die Escape-Registrierung im Einklang mit ``session``.
+    ///
+    /// **Bewusst am Ist-Zustand statt an Übergängen:** Es gibt mehrere Wege aus `.processing`
+    /// heraus — die Zustellung (`beendeVerarbeitung`), ein Fehler, und ein **neues Diktat**
+    /// (`handlePressed` setzt dann `.recording`, ohne dass je eine Zustellung stattfindet).
+    /// Registrierte man an jedem einzelnen Übergang, bliebe Escape auf dem vergessenen Pfad
+    /// systemweit belegt, bis die App beendet wird — ohne jeden Hinweis für den Anwender. Diese
+    /// Methode ist deshalb idempotent und darf großzügig aufgerufen werden: Sie fragt nur, ob
+    /// gerade verarbeitet wird.
+    ///
+    /// Während `.recording` wird **nicht** registriert: Dort verwirft die Fn-als-Modifier-Wache das
+    /// Diktat schon, wenn eine Taste gedrückt wird (s. `handleReleased()`). Für den Anwender ist
+    /// das Verhalten identisch — Escape bricht ab —, nur der Mechanismus unterscheidet sich.
+    private func synchronisiereAbbruchHotkey() {
+        if session == .processing {
+            abbruchHotkey.registriere { [weak self] in
+                Task { @MainActor in self?.brichAb() }
+            }
+        } else {
+            abbruchHotkey.gibFrei()
+        }
+    }
+
+    /// Bricht die laufende Verarbeitung ab. Wirkung folgt in Task 3.
+    private func brichAb() {}
+
     /// Setzt den Zustand nach einer Verarbeitung — aber **nur**, wenn sie erstens noch die
     /// JÜNGSTE ist (Finding 3, Review zu Task 4) und zweitens der Nutzer nicht inzwischen schon
     /// wieder aufnimmt. Beide Prüfungen sind unabhängig voneinander nötig:
@@ -703,6 +738,7 @@ public final class DictationCoordinator {
             overlay = .fehler(grund)
             blendeAusNach(dauerFehler)
         }
+        synchronisiereAbbruchHotkey()
     }
 
     /// Wartet auf alle offenen Verarbeitungen — aber höchstens bis `beendenZeitlimit` (Finding 4,
