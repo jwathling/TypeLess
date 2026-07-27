@@ -10,6 +10,13 @@ import Testing
 final class FakeAbbruchHotkey: AbbruchHotkey, @unchecked Sendable {
     private let lock = NSLock()
     private var beiDruck: (@Sendable () -> Void)?
+    /// Hält den ZULETZT registrierten Callback fest, unabhängig von `gibFrei()` (I3, Abschluss-
+    /// Review). Anders als `beiDruck`, das `gibFrei()` weiterhin nullt: Ohne dieses Feld ließe
+    /// sich ein VERSPÄTETER Carbon-Callback nicht nachstellen — genau das Szenario, vor dem der
+    /// `session == .processing`-Guard in `DictationCoordinator.brichAb()` schützt (die Closure aus
+    /// `synchronisiereAbbruchHotkey()` springt über `Task { @MainActor in … }`, und in diesem
+    /// Sprung kann `session` längst weitergezogen sein — s. `druckeVerspaetet()`).
+    private var letzteClosure: (@Sendable () -> Void)?
     private var _registrierungen = 0
     private var _freigaben = 0
 
@@ -18,7 +25,11 @@ final class FakeAbbruchHotkey: AbbruchHotkey, @unchecked Sendable {
     var freigaben: Int { lock.lock(); defer { lock.unlock() }; return _freigaben }
 
     func registriere(_ beiDruck: @escaping @Sendable () -> Void) {
-        lock.lock(); self.beiDruck = beiDruck; _registrierungen += 1; lock.unlock()
+        lock.lock()
+        self.beiDruck = beiDruck
+        letzteClosure = beiDruck
+        _registrierungen += 1
+        lock.unlock()
     }
 
     func gibFrei() {
@@ -28,6 +39,16 @@ final class FakeAbbruchHotkey: AbbruchHotkey, @unchecked Sendable {
     /// Der Test drückt Escape. Folgenlos, wenn nicht registriert — genau wie beim echten Hotkey.
     func druecke() {
         lock.lock(); let cb = beiDruck; lock.unlock()
+        cb?()
+    }
+
+    /// Simuliert einen Carbon-Callback, der TROTZ eines zwischenzeitlichen `gibFrei()` noch
+    /// unterwegs ist — ruft den ZULETZT registrierten Callback unabhängig vom aktuellen
+    /// Registrierungsstatus. Am echten Hotkey entspricht das einem Escape, dessen
+    /// `kEventHotKeyPressed` schon lief, bevor `UnregisterEventHotKey` griff, dessen Auswertung
+    /// (der `Task { @MainActor in … }`-Sprung) aber erst NACH der Freigabe zum Zug kommt.
+    func druckeVerspaetet() {
+        lock.lock(); let cb = letzteClosure; lock.unlock()
         cb?()
     }
 }
@@ -64,6 +85,22 @@ func einDruckOhneRegistrierungIstFolgenlos() {
     hotkey.druecke()
 
     #expect(gerufen == 0, "nach der Freigabe darf der Callback nicht mehr laufen")
+}
+
+@Test
+func druckeVerspaetetRuftDenLetztenCallbackAuchNachDerFreigabeAuf() {
+    // Die Kehrseite von `einDruckOhneRegistrierungIstFolgenlos` oben: `druckeVerspaetet()` MUSS,
+    // anders als `druecke()`, den Callback auch nach `gibFrei()` noch erreichen — sonst würden die
+    // Koordinator-Proben, die sich darauf stützen (I3, Abschluss-Review), gar nichts Reales prüfen.
+    let hotkey = FakeAbbruchHotkey()
+    nonisolated(unsafe) var gerufen = 0
+    hotkey.registriere { gerufen += 1 }
+    hotkey.gibFrei()
+
+    hotkey.druckeVerspaetet()
+
+    #expect(gerufen == 1,
+            "druckeVerspaetet() simuliert einen Carbon-Callback, der TROTZ gibFrei() noch unterwegs war")
 }
 
 // MARK: - I2 (Abschluss-Review): Handler erkennt fremde Hotkeys

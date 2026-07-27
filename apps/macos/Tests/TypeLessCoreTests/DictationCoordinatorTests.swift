@@ -2136,23 +2136,71 @@ func escapeWaehrendDerVerarbeitungBrichtAbUndStelltNichtsZu() async {
 
 @MainActor
 @Test(.timeLimit(.minutes(1)))
-func escapeOhneLaufendeVerarbeitungIstFolgenlos() async {
-    // Außerhalb einer Verarbeitung ist der Hotkey gar nicht registriert. Diese Probe sichert, dass
-    // ein trotzdem eintreffender Druck (Registrierung hängt, Ereignis kommt verspätet) keinen
-    // Zustand umwirft — sonst könnte Escape ein frisches Diktat oder den Leerlauf zerstören.
+func einVerspaeteterEscapeNachSessionWechselBrichtDieAlteVerarbeitungNicht() async {
+    // Ersetzt die frühere `escapeOhneLaufendeVerarbeitungIstFolgenlos` (I3, Abschluss-Review): Die
+    // alte Probe drückte Escape an einer NICHT registrierten Attrappe — deren Callback ist dann
+    // `nil`, es lief also gar kein Produktionscode, die Probe wäre auch grün gewesen, wenn
+    // `brichAb()` gar keinen Guard hätte (oder gar nicht existierte). Sie duplizierte damit nur
+    // `einDruckOhneRegistrierungIstFolgenlos` (`AbbruchHotkeyTests.swift`), das dieselbe
+    // Attrappen-Eigenschaft schon prüft.
+    //
+    // Diese Probe bildet stattdessen das SZENARIO nach, vor dem der Guard
+    // `guard session == .processing, let id = juengsteVerarbeitung else { return }`
+    // (`DictationCoordinator.brichAb()`) tatsächlich schützt: Die Callback-Closure aus
+    // `synchronisiereAbbruchHotkey()` springt über `Task { @MainActor in … }`
+    // (`DictationCoordinator.swift:753`) — in diesem Sprung kann `session` bereits weitergezogen
+    // sein. `FakeAbbruchHotkey.druckeVerspaetet()` ruft genau den Callback von Diktat A auf,
+    // NACHDEM ein zweites Fn `session` längst auf `.recording` gesetzt und Escape (via `gibFrei()`)
+    // wieder freigegeben hat — `juengsteVerarbeitung` zeigt dabei aber weiterhin auf A, weil B
+    // seine eigene Verarbeitung erst nach dem `.released` unten anmeldet. Ohne den
+    // `session == .processing`-Teil des Guards würde dieser verspätete Aufruf
+    // `verarbeitungen[A.id]?.cancel()` auslösen, obwohl der Anwender längst wieder aufnimmt — A
+    // käme dann nie an, ohne jede Rückmeldung und ohne Netz in der Zwischenablage.
     let hotkey = FakeHotkey()
     let recorder = FakeRecorder(samples: sprache())
-    let client = DictationClient(ergebnis: .success(ergebnis("Hallo")))
+    let client = GatedDictationClient()
     let abbruch = FakeAbbruchHotkey()
+    let inserter = SpyInserter()
     let coordinator = makeCoordinator(hotkey: hotkey, recorder: recorder, client: client,
-                                      pasteboard: SpyPasteboard(), abbruchHotkey: abbruch)
+                                      pasteboard: SpyPasteboard(), inserter: inserter,
+                                      abbruchHotkey: abbruch)
     await coordinator.start()
+    var iterator = client.processGestartet.makeAsyncIterator()
 
-    abbruch.druecke()
+    // Diktat A -> Verarbeitung läuft (torgesteuert), Escape ist registriert; `juengsteVerarbeitung`
+    // zeigt auf A.
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+    _ = await iterator.next()
+    await warteBis { coordinator.session == .processing }
+    #expect(abbruch.istRegistriert)
+
+    // Zweites Fn drücken, WÄHREND A noch offen ist: `session` wechselt auf `.recording`, das
+    // `didSet` gibt Escape frei (gleiches Muster wie
+    // `einNeuesDiktatWaehrendDerVerarbeitungGibtDenHotkeyFrei`) — `juengsteVerarbeitung` bleibt
+    // dabei A, solange B noch nicht selbst in Verarbeitung geht.
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    #expect(abbruch.istRegistriert == false)
+
+    // Der verspätete Escape trifft jetzt ein.
+    abbruch.druckeVerspaetet()
     await Task.yield()
 
-    #expect(coordinator.session == .idle)
-    #expect(coordinator.overlay == .aus)
+    #expect(coordinator.session == .recording, "B läuft ungestört weiter — kein Zustand umgeworfen")
+    #expect(coordinator.overlay != .abgebrochen, "kein Abbruch darf sichtbar werden")
+
+    // B zu Ende bringen; beide Verarbeitungen auflösen (FIFO: A zuerst, weil zuerst gestartet).
+    hotkey.send(.released)
+    _ = await iterator.next()
+    await warteBis { coordinator.session == .processing }
+    client.freigeben(mit: .success(ergebnis("A")))
+    client.freigeben(mit: .success(ergebnis("B")))
+    await warteBis { inserter.getippt.contains("A") && inserter.getippt.contains("B") }
+
+    #expect(inserter.getippt.contains("A"),
+            "A muss trotz des verspäteten Escapes ganz normal zustellen — der Guard hat sie geschützt")
 }
 
 @MainActor
