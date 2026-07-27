@@ -46,7 +46,16 @@ public enum SessionState: Sendable, Equatable {
 @MainActor
 @Observable
 public final class DictationCoordinator {
-    public private(set) var session: SessionState = .idle
+    /// **`didSet` statt einzelner Aufrufstellen (Critical, Review Task 2):** Eine Aufzählung von
+    /// Aufrufstellen ist die fragile Strategie — bei rund sechzehn `session = …`-Zuweisungen im
+    /// Koordinator übersieht man leicht einen Pfad (belegt: der `catch`-Block in `handlePressed()`
+    /// und die „Hotkey inaktiv"-Closure in `start()` blieben beim ersten Anlauf unsynchronisiert,
+    /// weil beide während `.processing` auf `.failed` springen können, ohne über
+    /// `beendeVerarbeitung` zu laufen). `didSet` kann keinen Pfad vergessen, weil es an der
+    /// Eigenschaft selbst hängt statt an den Stellen, die sie ändern.
+    public private(set) var session: SessionState = .idle {
+        didSet { synchronisiereAbbruchHotkey() }
+    }
 
     /// Was das Overlay gerade anzeigt (s. ``OverlayZustand``). Getrennt von ``session``: Das
     /// Overlay zeigt den Live-Pegel und den erkannten Text, die der ``SessionState`` nicht trägt,
@@ -253,8 +262,13 @@ public final class DictationCoordinator {
         ausblendTask?.cancel()
         session = .idle
         overlay = .aus
-        // Bewusst der direkte Aufruf statt `synchronisiereAbbruchHotkey()`: Beim Beenden soll
-        // Escape in JEDEM Fall frei werden, unabhängig davon, welchen Wert `session` gerade trägt.
+        // Der `didSet` auf `session` hat das oben bereits erledigt (die Zuweisung auf `.idle`
+        // synchronisiert automatisch). Dieser Aufruf bleibt trotzdem bewusst stehen — nicht als
+        // Zufallsredundanz, sondern als von `session` UNABHÄNGIGE Garantie: Sollte `session` beim
+        // Beenden aus irgendeinem Grund NICHT wechseln (z. B. weil sie schon `.idle` war und ein
+        // künftiger Refactor `didSet` änderungsscharf statt bei jeder Zuweisung feuern lässt), darf
+        // Escape trotzdem nicht auf der Strecke bleiben. Beim Beenden soll es in JEDEM Fall frei
+        // werden, komplett unabhängig vom Mechanismus, der `session` sonst synchronisiert.
         abbruchHotkey.gibFrei()
     }
 
@@ -420,7 +434,6 @@ public final class DictationCoordinator {
         Task { [client] in try? await client.preload() }
 
         session = .recording
-        synchronisiereAbbruchHotkey()
         // Task 4 (Diktat-Overlay): Ein neues Diktat räumt einen noch laufenden Ausblend-Timer
         // eines VORHERIGEN Diktats sofort weg — sonst würde der alte Timer gleich darauf dieses
         // frische Overlay wieder auf `.aus` ziehen.
@@ -524,7 +537,6 @@ public final class DictationCoordinator {
         }
 
         session = .processing
-        synchronisiereAbbruchHotkey()
         overlay = .verarbeitet
         verarbeite(samples, zielApp: zielAppBeimDruck)
     }
@@ -677,13 +689,19 @@ public final class DictationCoordinator {
 
     /// Hält die Escape-Registrierung im Einklang mit ``session``.
     ///
-    /// **Bewusst am Ist-Zustand statt an Übergängen:** Es gibt mehrere Wege aus `.processing`
-    /// heraus — die Zustellung (`beendeVerarbeitung`), ein Fehler, und ein **neues Diktat**
-    /// (`handlePressed` setzt dann `.recording`, ohne dass je eine Zustellung stattfindet).
-    /// Registrierte man an jedem einzelnen Übergang, bliebe Escape auf dem vergessenen Pfad
-    /// systemweit belegt, bis die App beendet wird — ohne jeden Hinweis für den Anwender. Diese
-    /// Methode ist deshalb idempotent und darf großzügig aufgerufen werden: Sie fragt nur, ob
-    /// gerade verarbeitet wird.
+    /// **Bewusst am Ist-Zustand statt an Übergängen — und deshalb an `didSet` von `session`
+    /// gehängt, nicht an einzelne Aufrufstellen (Critical, Review Task 2):** Es gibt mehrere Wege
+    /// aus `.processing` heraus — die Zustellung (`beendeVerarbeitung`), ein neues Diktat
+    /// (`handlePressed` setzt dann `.recording`, ohne dass je eine Zustellung stattfindet) — und
+    /// mehrere Wege auf `.failed`, während `.processing` noch läuft, die NICHT über
+    /// `beendeVerarbeitung` laufen (der `catch`-Block in `handlePressed()`, wenn `recorder.start()`
+    /// für ein NEUES Diktat wirft, während die ALTE Verarbeitung noch offen ist; die „Hotkey
+    /// inaktiv"-Closure in `start()`, falls der Fn-Tap-Stream während `.processing` stirbt — ein
+    /// vom Carbon-Abbruch-Hotkey völlig unabhängiger Mechanismus). Eine Liste von Aufrufstellen
+    /// müsste JEDEN dieser Wege einzeln kennen und pflegen; `didSet` auf `session` kann keinen
+    /// vergessen, weil es an der Eigenschaft selbst hängt, nicht an den Stellen, die sie ändern.
+    /// Diese Methode bleibt deshalb idempotent (fragt nur, ob gerade verarbeitet wird) und wird bei
+    /// **jeder** Zuweisung an `session` aufgerufen — auch bei einer, die den Wert nicht ändert.
     ///
     /// Während `.recording` wird **nicht** registriert: Dort verwirft die Fn-als-Modifier-Wache das
     /// Diktat schon, wenn eine Taste gedrückt wird (s. `handleReleased()`). Für den Anwender ist
@@ -738,7 +756,6 @@ public final class DictationCoordinator {
             overlay = .fehler(grund)
             blendeAusNach(dauerFehler)
         }
-        synchronisiereAbbruchHotkey()
     }
 
     /// Wartet auf alle offenen Verarbeitungen — aber höchstens bis `beendenZeitlimit` (Finding 4,
