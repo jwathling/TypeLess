@@ -53,6 +53,23 @@ public final class SystemAbbruchHotkey: AbbruchHotkey, @unchecked Sendable {
 
     public init() {}
 
+    /// Erzwingt jetzt tatsächlich, was der Kommentar bei `passUnretained` oben zusagt (I1,
+    /// Abschluss-Review): Ohne dieses `deinit` war die Garantie „`gibFrei()` läuft vor der
+    /// Freigabe" nur eine Konvention an der EINEN Aufrufstelle in `TypeLessApp.swift`, nicht eine
+    /// Eigenschaft dieses Typs — `TypeLessCore` ist eine Bibliothek mit `public init()`, jeder
+    /// künftige Besitzer könnte die Konvention brechen. Dann bliebe im PROZESSGLOBALEN
+    /// Carbon-Handler ein `passUnretained`-Zeiger auf freigegebenen Speicher stehen, den das
+    /// nächste Escape dereferenziert — Use-after-free, nicht bloß ein hängender Hotkey.
+    ///
+    /// **Sicher aus `deinit` aufrufbar:** `gibFrei()` ist nicht actor-isoliert (die Klasse ist
+    /// `@unchecked Sendable`, kein `@MainActor`), sperrt nur ``lock`` (ein einfaches `NSLock`) und
+    /// ruft ausschließlich Carbon-Funktionen sowie `beiDruck = nil` — nichts davon verlangt einen
+    /// bestimmten Thread oder Ausführungskontext. Zum Zeitpunkt von `deinit` ist der Referenzzähler
+    /// bereits auf null: Es kann keine zweite, gleichzeitig laufende `registriere`-/`gibFrei`-
+    /// Aufrufstelle mehr geben, die um denselben Lock konkurrierte — kein Deadlock-, kein
+    /// Reentranz-Risiko.
+    deinit { gibFrei() }
+
     public func registriere(_ beiDruck: @escaping @Sendable () -> Void) {
         lock.lock()
         defer { lock.unlock() }
@@ -64,8 +81,12 @@ public final class SystemAbbruchHotkey: AbbruchHotkey, @unchecked Sendable {
         var eventTyp = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
                                      eventKind: UInt32(kEventHotKeyPressed))
         // `Unmanaged` als Brücke in den C-Callback: Carbon kennt keine Swift-Closures. Die
-        // Referenz wird NICHT retained (`passUnretained`) — dieser Typ überlebt seinen Handler,
-        // weil `gibFrei()` ihn vor der Freigabe des Objekts abbaut.
+        // Referenz wird NICHT retained (`passUnretained`) — das ist nur sicher, WEIL `deinit`
+        // unten `gibFrei()` erzwingt (I1, Abschluss-Review): Der Handler im PROZESSGLOBALEN
+        // Carbon-Event-Target wird garantiert VOR der Freigabe dieses Objekts abgebaut, nie
+        // danach. Ohne diese Garantie bliebe bei einer dealloziierten, aber noch registrierten
+        // Instanz ein Zeiger auf freigegebenen Speicher im Handler stehen — das nächste Escape
+        // wäre ein Use-after-free, nicht bloß ein hängender Hotkey.
         let selbst = Unmanaged.passUnretained(self).toOpaque()
         InstallEventHandler(GetApplicationEventTarget(), { _, event, nutzerdaten in
             // I2 (Abschluss-Review, Important): Dieser Handler hängt am APPLICATION-Event-Target
