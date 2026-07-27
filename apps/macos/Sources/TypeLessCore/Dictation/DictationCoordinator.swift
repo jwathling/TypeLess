@@ -625,13 +625,32 @@ public final class DictationCoordinator {
                 // von `verarbeite(_:zielApp:)` — wir sind hier bereits auf dem MainActor, der
                 // Aufruf ist synchron (`beendeVerarbeitung` ist bewusst nicht `async`).
                 self?.beendeVerarbeitung(id: id, zustellung: zustellung)
-            } catch is CancellationError {
-                // Der Anwender hat abgebrochen — kein Fehler, kein Warnzeichen, kein Netz.
-                self?.beendeVerarbeitung(id: id, zustellung: .abgebrochen)
             } catch {
-                // Echter Fehler (Engine weg, STT-Ausfall): Die Zwischenablage bleibt unangetastet
-                // — der alte Inhalt ist besser als Leere.
-                self?.beendeVerarbeitung(id: id, zustellung: .fehler(Self.beschreibe(error)))
+                // Ein Zweig statt zwei getrennter `catch`-Klauseln (Review-Fix, Critical): Ein
+                // `CancellationError` wird NUR als direkte Folge der eigenen Stornierung geworfen
+                // — an dieser Stelle ist `Task.isCancelled` also immer schon wahr, sobald der
+                // Fehlertyp es wäre. Die Prüfung auf `Task.isCancelled` allein deckt beide Fälle
+                // ab, ohne das Signal zweimal zu kodieren.
+                //
+                // Und genau diese Prüfung ist hier UNVERZICHTBAR, nicht nur Bequemlichkeit: Trifft
+                // der Abbruch die Task, während sie in `receive()` hängt (`HTTPUnixTransport
+                // .roundTrip`, der weit überwiegende Fall — ein Diktat braucht Sekunden, das
+                // `.cancelled`-Fenster in `waitUntilReady` dagegen nur Sub-Millisekunden), löst
+                // `connection.cancel()` den offenen Callback mit einem FEHLER aus, nicht mit
+                // einer Stornierung — Network.framework kennt an dieser Stelle keinen eigenen
+                // Abbruchgrund. Das kommt als `TransportError.unreachable` bzw. `SidecarError
+                // .unreachable` an, NICHT als `CancellationError`. Ohne den `Task.isCancelled`-
+                // Rückfall hätte ein per Escape abgebrochenes Diktat dem Anwender im Regelfall ein
+                // Warndreieck gezeigt — der Abbruchwunsch schlägt die Fehlerursache, wer abbricht,
+                // will keine Fehlermeldung sehen, egal wie der Transport das Verbindungsende nach
+                // außen meldet.
+                if Task.isCancelled {
+                    self?.beendeVerarbeitung(id: id, zustellung: .abgebrochen)
+                } else {
+                    // Echter Fehler (Engine weg, STT-Ausfall): Die Zwischenablage bleibt
+                    // unangetastet — der alte Inhalt ist besser als Leere.
+                    self?.beendeVerarbeitung(id: id, zustellung: .fehler(Self.beschreibe(error)))
+                }
             }
         }
         verarbeitungen[id] = task
