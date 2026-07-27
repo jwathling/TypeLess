@@ -2087,3 +2087,115 @@ func einFehlerBeimZweitenStartWaehrendDerVerarbeitungGibtDenHotkeyFrei() async {
             "ein gescheiterter Neustart während laufender Verarbeitung muss Escape freigeben")
     client.freigeben(mit: .success(ergebnis("Hallo")))   // die noch offene Verarbeitung auflösen
 }
+
+// MARK: - Abbruch während der Verarbeitung
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func escapeWaehrendDerVerarbeitungBrichtAbUndStelltNichtsZu() async {
+    // Der Kern dieser Spec: Der Anwender merkt „das war Quatsch" und drückt Escape in den ~6 s
+    // Verarbeitung. Nichts darf getippt werden, und die Zwischenablage muss ihren alten Inhalt
+    // behalten — anders als bei einem geglückten Diktat, das dort immer ein Netz ablegt.
+    let hotkey = FakeHotkey()
+    let recorder = FakeRecorder(samples: sprache())
+    let client = GatedDictationClient()
+    let abbruch = FakeAbbruchHotkey()
+    let inserter = SpyInserter()
+    let pasteboard = SpyPasteboard()
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: recorder, client: client,
+                                      pasteboard: pasteboard, inserter: inserter,
+                                      abbruchHotkey: abbruch)
+    await coordinator.start()
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+
+    // Auf `processGestartet` warten, BEVOR freigegeben wird: Sonst läuft die Freigabe, bevor die
+    // Verarbeitungs-Task ihre Continuation angemeldet hat — ein deterministischer Wettlauf (in
+    // Task 2 mit genau diesem Fehler 5/5 rot). Gleiches Muster wie bei den bestehenden
+    // `GatedDictationClient`-Proben in dieser Datei.
+    var iterator = client.processGestartet.makeAsyncIterator()
+    hotkey.send(.released)
+    _ = await iterator.next()
+    await warteBis { coordinator.session == .processing }
+
+    abbruch.druecke()                                            // Escape
+    // Danach trotzdem freigeben: `process` hängt in `withCheckedContinuation`, das auf `cancel()`
+    // nicht reagiert. Die Task läuft erst weiter, wenn die Engine antwortet — und trifft dann den
+    // `isCancelled`-Check. Genau dieser Ablauf entspricht der Realität: Die Engine rechnet ihr
+    // Diktat zu Ende, das Ergebnis wird verworfen.
+    client.freigeben(mit: .success(ergebnis("darf nie ankommen")))
+    await warteBis { coordinator.overlay == .abgebrochen }
+
+    #expect(coordinator.session == .idle, "ein Abbruch ist kein Fehler")
+    #expect(coordinator.overlay == .abgebrochen)
+    #expect(inserter.getippt.isEmpty, "es darf nichts getippt werden")
+    #expect(pasteboard.geschrieben.isEmpty,
+            "bei Abbruch bleibt die Zwischenablage unangetastet — kein Netz")
+    #expect(abbruch.istRegistriert == false, "nach dem Abbruch muss Escape wieder frei sein")
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func escapeOhneLaufendeVerarbeitungIstFolgenlos() async {
+    // Außerhalb einer Verarbeitung ist der Hotkey gar nicht registriert. Diese Probe sichert, dass
+    // ein trotzdem eintreffender Druck (Registrierung hängt, Ereignis kommt verspätet) keinen
+    // Zustand umwirft — sonst könnte Escape ein frisches Diktat oder den Leerlauf zerstören.
+    let hotkey = FakeHotkey()
+    let recorder = FakeRecorder(samples: sprache())
+    let client = DictationClient(ergebnis: .success(ergebnis("Hallo")))
+    let abbruch = FakeAbbruchHotkey()
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: recorder, client: client,
+                                      pasteboard: SpyPasteboard(), abbruchHotkey: abbruch)
+    await coordinator.start()
+
+    abbruch.druecke()
+    await Task.yield()
+
+    #expect(coordinator.session == .idle)
+    #expect(coordinator.overlay == .aus)
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func derAbbruchTrifftNurDieJuengsteVerarbeitung() async {
+    // Läuft noch eine ältere Verarbeitung, gehört sie zu einem früheren Diktat, das der Anwender
+    // nicht gemeint hat. Escape bezieht sich auf das, dessen Overlay er gerade sieht — die ältere
+    // muss ungestört zu Ende laufen und ihren Text zustellen.
+    //
+    // Die Freigabe des torgesteuerten Clients ist FIFO: Der erste `freigeben`-Aufruf löst die
+    // ÄLTERE Verarbeitung auf, der zweite die jüngere. Unterschiedliche Texte machen sichtbar,
+    // welche von beiden zugestellt hat.
+    let hotkey = FakeHotkey()
+    let recorder = FakeRecorder(samples: sprache())
+    let client = GatedDictationClient()
+    let abbruch = FakeAbbruchHotkey()
+    let inserter = SpyInserter()
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: recorder, client: client,
+                                      pasteboard: SpyPasteboard(), inserter: inserter,
+                                      abbruchHotkey: abbruch)
+    await coordinator.start()
+    // Auf `processGestartet` warten, jeweils VOR der zugehörigen Freigabe weiter unten — gleiches
+    // Muster wie oben, hier zweimal für die zwei parallelen Verarbeitungen.
+    var iterator = client.processGestartet.makeAsyncIterator()
+    // Erstes Diktat -> Verarbeitung läuft (torgesteuert, antwortet noch nicht)
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+    _ = await iterator.next()
+    await warteBis { coordinator.session == .processing }
+    // Zweites Diktat -> wird die jüngste Verarbeitung
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+    _ = await iterator.next()
+    await warteBis { coordinator.session == .processing }
+
+    abbruch.druecke()                                       // trifft die JÜNGERE
+    client.freigeben(mit: .success(ergebnis("Erstes")))     // FIFO: die ältere
+    client.freigeben(mit: .success(ergebnis("Zweites")))    // die jüngere, abgebrochen
+    await warteBis { coordinator.overlay == .abgebrochen }
+
+    #expect(coordinator.session == .idle)
+    #expect(inserter.getippt == ["Erstes"],
+            "die ältere Verarbeitung darf NICHT mitabgebrochen werden — sie stellt zu")
+}

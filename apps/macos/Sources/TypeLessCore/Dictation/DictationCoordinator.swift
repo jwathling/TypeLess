@@ -554,6 +554,9 @@ public final class DictationCoordinator {
         /// Stille-Gate nichts machen konnte. Es gibt nichts zuzustellen — aber es ist auch kein
         /// geglücktes Diktat.
         case nichtsErkannt
+        /// Der Anwender hat während der Verarbeitung abgebrochen. **Kein Fehler** — und
+        /// ausdrücklich **kein** Netz in der Zwischenablage: Diesen Text will er nicht.
+        case abgebrochen
         case fehler(String)
     }
 
@@ -599,6 +602,22 @@ public final class DictationCoordinator {
                 // Der Text wird in JEDEM Fall zugestellt (eingefügt oder, wenn das nicht sicher
                 // möglich ist, in die Zwischenablage gelegt) — nur `session` folgt ihm ggf. nicht
                 // mehr (s. `beendeVerarbeitung`).
+
+                // DER ATOMARE SCHNITT: Ab hier gibt es kein Zurück. `stelleZu` schreibt die
+                // Zwischenablage und tippt; danach ist der Text beim Anwender. Weil `stelleZu` und
+                // `beendeVerarbeitung` synchron auf dem MainActor laufen, liegt zwischen dieser
+                // Prüfung und der Zustellung **kein Suspension-Punkt** — ein später eintreffender
+                // Abbruch kann also nichts mehr halb erledigen. Entweder abgebrochen oder
+                // zugestellt, nie beides.
+                //
+                // Ehrlich benannt: Ein Escape, das NACH dieser Zeile eintrifft, wird ignoriert und
+                // der Text ist eingefügt. Das ist die sichere Seite — lieber ein nicht
+                // abgebrochenes Diktat als ein halb eingefügtes.
+                if Task.isCancelled {
+                    self?.beendeVerarbeitung(id: id, zustellung: .abgebrochen)
+                    return
+                }
+
                 let zustellung = Self.stelleZu(ergebnis.finalText, zielApp: zielApp,
                                                target: target, inserter: inserter,
                                                pasteboard: pasteboard)
@@ -606,6 +625,9 @@ public final class DictationCoordinator {
                 // von `verarbeite(_:zielApp:)` — wir sind hier bereits auf dem MainActor, der
                 // Aufruf ist synchron (`beendeVerarbeitung` ist bewusst nicht `async`).
                 self?.beendeVerarbeitung(id: id, zustellung: zustellung)
+            } catch is CancellationError {
+                // Der Anwender hat abgebrochen — kein Fehler, kein Warnzeichen, kein Netz.
+                self?.beendeVerarbeitung(id: id, zustellung: .abgebrochen)
             } catch {
                 // Echter Fehler (Engine weg, STT-Ausfall): Die Zwischenablage bleibt unangetastet
                 // — der alte Inhalt ist besser als Leere.
@@ -716,8 +738,23 @@ public final class DictationCoordinator {
         }
     }
 
-    /// Bricht die laufende Verarbeitung ab. Wirkung folgt in Task 3.
-    private func brichAb() {}
+    /// Bricht die **jüngste** laufende Verarbeitung ab (Auslöser: Escape, s.
+    /// ``synchronisiereAbbruchHotkey()``).
+    ///
+    /// Ältere, noch laufende Verarbeitungen bleiben unberührt — sie gehören zu einem früheren
+    /// Diktat, das der Anwender nicht gemeint hat.
+    ///
+    /// Der Abbruch ist kooperativ: `cancel()` schließt über den Transport die HTTP-Verbindung
+    /// (`HTTPUnixTransport.roundTrip` hängt in `withTaskCancellationHandler`), und der
+    /// `isCancelled`-Check in `verarbeite` verhindert die Zustellung. Die **Engine** rechnet ihr
+    /// Diktat trotzdem zu Ende: Die MLX-Generierung läuft in einem Worker-Thread und ist nicht
+    /// unterbrechbar. Ein unmittelbar folgendes Diktat wartet daher ggf. wenige Sekunden auf den
+    /// Lock des Sidecars — tolerierbar, und der Preis dafür, keinen serverseitigen Abbruch zu
+    /// brauchen.
+    private func brichAb() {
+        guard session == .processing, let id = juengsteVerarbeitung else { return }
+        verarbeitungen[id]?.cancel()
+    }
 
     /// Setzt den Zustand nach einer Verarbeitung — aber **nur**, wenn sie erstens noch die
     /// JÜNGSTE ist (Finding 3, Review zu Task 4) und zweitens der Nutzer nicht inzwischen schon
@@ -751,6 +788,10 @@ public final class DictationCoordinator {
             session = .failed("Nichts erkannt")
             overlay = .fehler("Nichts erkannt")
             blendeAusNach(dauerFehler)
+        case .abgebrochen:
+            session = .idle
+            overlay = .abgebrochen
+            blendeAusNach(dauerAbgebrochen)
         case let .fehler(grund):
             session = .failed(grund)
             overlay = .fehler(grund)
