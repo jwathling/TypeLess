@@ -1,3 +1,4 @@
+@preconcurrency import Carbon
 import Foundation
 import Testing
 @testable import TypeLessCore
@@ -63,4 +64,33 @@ func einDruckOhneRegistrierungIstFolgenlos() {
     hotkey.druecke()
 
     #expect(gerufen == 0, "nach der Freigabe darf der Callback nicht mehr laufen")
+}
+
+// MARK: - I2 (Abschluss-Review): Handler erkennt fremde Hotkeys
+
+/// `SystemAbbruchHotkey.gehoertZuDieserRegistrierung` ist bewusst als reine Werttypen-Funktion aus
+/// dem C-Callback herausgezogen (s. dort) — genau damit sie HIER, ohne jede echte
+/// `RegisterEventHotKey`-Anmeldung, geprüft werden kann. `EventHotKeyID`/`OSStatus` sind reine
+/// Structs/Int32-Aliase; ihre Erzeugung nimmt dem Testrechner keine Taste weg.
+@Test
+func derHandlerErkenntNurDieEigeneKombination() {
+    let eigene = EventHotKeyID(signature: SystemAbbruchHotkey.eigeneSignatur,
+                               id: SystemAbbruchHotkey.eigeneId)
+    #expect(SystemAbbruchHotkey.gehoertZuDieserRegistrierung(status: noErr, empfangeneId: eigene),
+            "die eigene Kombination muss erkannt werden")
+
+    let fremdeId = EventHotKeyID(signature: SystemAbbruchHotkey.eigeneSignatur, id: 2)
+    #expect(!SystemAbbruchHotkey.gehoertZuDieserRegistrierung(status: noErr, empfangeneId: fremdeId),
+            "gleiche Signatur, andere ID darf nicht als eigene erkannt werden")
+
+    let fremdeSignatur = EventHotKeyID(signature: OSType(0), id: SystemAbbruchHotkey.eigeneId)
+    #expect(!SystemAbbruchHotkey.gehoertZuDieserRegistrierung(status: noErr,
+                                                               empfangeneId: fremdeSignatur),
+            "gleiche ID, andere Signatur (z. B. ein fremder KeyboardShortcuts-Hotkey) darf nicht durchgehen")
+
+    // Fail-safe: Scheitert schon das Lesen der ID, wird NICHT ausgelöst — lieber ein verpasster
+    // Abbruch als ein fremder Hotkey, der ein laufendes Diktat verwirft.
+    #expect(!SystemAbbruchHotkey.gehoertZuDieserRegistrierung(status: OSStatus(paramErr),
+                                                               empfangeneId: eigene),
+            "ein Fehler beim Lesen der ID darf nicht als eigene Kombination durchgehen")
 }

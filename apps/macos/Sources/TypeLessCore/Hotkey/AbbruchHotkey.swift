@@ -37,6 +37,15 @@ public final class SystemAbbruchHotkey: AbbruchHotkey, @unchecked Sendable {
     /// nicht als magische Zahl im Registrierungsaufruf steht.
     private static let escapeKeycode: UInt32 = 53
 
+    /// Eigene Kennung dieser Registrierung. Dient zwei Zwecken: verhindert eine Kollision mit
+    /// einer fremden Anmeldung (schon immer so) UND lässt den Handler unten (I2, Abschluss-Review)
+    /// prüfen, ob ein empfangenes `kEventHotKeyPressed` wirklich ihm gehört. Bewusst NICHT
+    /// `private`: ``gehoertZuDieserRegistrierung(status:empfangeneId:)`` muss ohne echte
+    /// Carbon-Registrierung testbar bleiben (`@testable import` macht `internal` für Proben
+    /// sichtbar, `private` bliebe ihnen verschlossen).
+    static let eigeneSignatur = OSType(0x544C_4553 /* "TLES" */)
+    static let eigeneId: UInt32 = 1
+
     private let lock = NSLock()
     private var hotKeyRef: EventHotKeyRef?
     private var handlerRef: EventHandlerRef?
@@ -58,17 +67,50 @@ public final class SystemAbbruchHotkey: AbbruchHotkey, @unchecked Sendable {
         // Referenz wird NICHT retained (`passUnretained`) — dieser Typ überlebt seinen Handler,
         // weil `gibFrei()` ihn vor der Freigabe des Objekts abbaut.
         let selbst = Unmanaged.passUnretained(self).toOpaque()
-        InstallEventHandler(GetApplicationEventTarget(), { _, _, nutzerdaten in
-            guard let nutzerdaten else { return noErr }
+        InstallEventHandler(GetApplicationEventTarget(), { _, event, nutzerdaten in
+            // I2 (Abschluss-Review, Important): Dieser Handler hängt am APPLICATION-Event-Target
+            // und bekäme ohne diese Prüfung JEDES `kEventHotKeyPressed` des Prozesses zu sehen —
+            // nicht nur das eigene. Heute folgenlos (nur diese Datei ruft `RegisterEventHotKey`),
+            // aber CLAUDE.md nennt `KeyboardShortcuts` als verbindliche Hotkey-Bibliothek für M6/
+            // M7, und die nutzt intern ebenfalls `RegisterEventHotKey`: Ab dann würde JEDER
+            // Anwender-Shortcut, der während der ~6 s Verarbeitung gedrückt wird, das Diktat
+            // kommentarlos abbrechen. Die eigentliche Prüfung steckt in
+            // `gehoertZuDieserRegistrierung` — rein werttypenbasiert und damit ohne echte
+            // Carbon-Registrierung testbar.
+            guard let event else { return OSStatus(eventNotHandledErr) }
+            var empfangeneId = EventHotKeyID()
+            let status = GetEventParameter(event, EventParamName(kEventParamDirectObject),
+                                           EventParamType(typeEventHotKeyID), nil,
+                                           MemoryLayout<EventHotKeyID>.size, nil, &empfangeneId)
+            guard SystemAbbruchHotkey.gehoertZuDieserRegistrierung(status: status,
+                                                                    empfangeneId: empfangeneId)
+            else {
+                // NICHT `noErr`: Das würde das Ereignis HIER verschlucken, obwohl es einem
+                // fremden Hotkey gehört — dessen eigentlicher Empfänger bekäme es dann nie zu
+                // sehen. `eventNotHandledErr` lässt es für die weitere Handler-Kette laufen.
+                return OSStatus(eventNotHandledErr)
+            }
+            guard let nutzerdaten else { return OSStatus(eventNotHandledErr) }
             let ich = Unmanaged<SystemAbbruchHotkey>.fromOpaque(nutzerdaten).takeUnretainedValue()
             ich.ausloesen()
             return noErr
         }, 1, &eventTyp, selbst, &handlerRef)
 
-        // Eigene Signatur, damit diese Anmeldung nicht mit einer fremden kollidiert.
-        let kennung = EventHotKeyID(signature: OSType(0x544C_4553 /* "TLES" */), id: 1)
+        let kennung = EventHotKeyID(signature: Self.eigeneSignatur, id: Self.eigeneId)
         RegisterEventHotKey(Self.escapeKeycode, 0, kennung,
                             GetApplicationEventTarget(), 0, &hotKeyRef)
+    }
+
+    /// Rein logische Prüfung, OB ein empfangenes `kEventHotKeyPressed` DIESER Registrierung
+    /// gehört — aus dem C-Callback herausgezogen, damit sie ohne echte Carbon-Registrierung
+    /// testbar ist (I2, Abschluss-Review): `OSStatus`/`EventHotKeyID` sind reine Werttypen, ihre
+    /// Erzeugung nimmt dem Testrechner keine Taste weg.
+    ///
+    /// **Fail-safe, nicht fail-open:** Scheitert schon das Lesen der ID (`status != noErr`), wird
+    /// NICHT ausgelöst — lieber ein verpasster Abbruch als ein fremder Hotkey, der ein laufendes
+    /// Diktat verwirft.
+    static func gehoertZuDieserRegistrierung(status: OSStatus, empfangeneId: EventHotKeyID) -> Bool {
+        status == noErr && empfangeneId.signature == eigeneSignatur && empfangeneId.id == eigeneId
     }
 
     public func gibFrei() {
