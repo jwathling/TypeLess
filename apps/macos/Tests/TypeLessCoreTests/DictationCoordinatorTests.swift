@@ -2052,3 +2052,38 @@ func einNeuesDiktatWaehrendDerVerarbeitungGibtDenHotkeyFrei() async {
             "beim Wechsel zurück ins Aufnehmen muss Escape freigegeben werden")
     client.freigeben(mit: .success(ergebnis("Hallo")))   // die offene Verarbeitung auflösen
 }
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func einFehlerBeimZweitenStartWaehrendDerVerarbeitungGibtDenHotkeyFrei() async {
+    // Critical, Review Task 2: Ein Pfad, den die vier ursprünglichen Aufrufstellen NICHT
+    // abdeckten. Drückt der Anwender Fn für ein NEUES Diktat, während die ALTE Verarbeitung noch
+    // offen ist, und `recorder.start()` wirft (Mikrofonzugriff entzogen, AVAudioEngine-Fehler —
+    // beides dokumentierte, echte Fälle), landet `handlePressed()`s `catch`-Block bei
+    // `session = .failed(...)`, OHNE je über `beendeVerarbeitung` zu laufen. Die vier
+    // Aufrufstellen aus dem ursprünglichen Brief kannten diesen Pfad nicht — Escape wäre bis zum
+    // Beenden der App systemweit blockiert geblieben. Der `didSet` auf `session` schließt ihn,
+    // weil er an der Eigenschaft selbst hängt statt an den Stellen, die sie ändern.
+    let hotkey = FakeHotkey()
+    let recorder = FakeRecorder(samples: sprache())
+    let client = GatedDictationClient()
+    let abbruch = FakeAbbruchHotkey()
+    let coordinator = makeCoordinator(hotkey: hotkey, recorder: recorder, client: client,
+                                     pasteboard: SpyPasteboard(), abbruchHotkey: abbruch)
+    await coordinator.start()
+    hotkey.send(.pressed)
+    await warteBis { coordinator.session == .recording }
+    hotkey.send(.released)
+    await warteBis { coordinator.session == .processing }
+    #expect(abbruch.istRegistriert, "während der (noch offenen) Verarbeitung muss Escape belegt sein")
+
+    // Ab jetzt soll der NÄCHSTE `start()` scheitern — die ALTE Verarbeitung bleibt bewusst offen,
+    // damit der Fehler mitten in `.processing` einschlägt.
+    await recorder.setFehlerBeimStart(.microphoneDenied)
+    hotkey.send(.pressed)
+    await warteBis { if case .failed = coordinator.session { return true } else { return false } }
+
+    #expect(abbruch.istRegistriert == false,
+            "ein gescheiterter Neustart während laufender Verarbeitung muss Escape freigeben")
+    client.freigeben(mit: .success(ergebnis("Hallo")))   // die noch offene Verarbeitung auflösen
+}
