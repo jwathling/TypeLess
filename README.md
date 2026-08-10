@@ -8,6 +8,28 @@ interpunktiert. **Keine Cloud, keine APIs, keine Daten verlassen den Rechner.**
 Ablauf: Hotkey → lokale Transkription → deterministisches Wörterbuch → Sprachverbesserung (LLM)
 → Einfügen.
 
+## Installation
+
+**Voraussetzungen:** Mac mit Apple Silicon (M1 oder neuer), macOS 14 oder neuer, 16 GB RAM
+empfohlen, einige Gigabyte freier Plattenplatz für die Modelle.
+
+1. Das Zip des neuesten [Releases](https://github.com/jwathling/TypeLess/releases) laden,
+   entpacken, `TypeLess.app` nach „Programme" ziehen.
+2. **Beim ersten Öffnen meldet macOS, die App stamme von einem unbekannten Entwickler.** Das ist
+   erwartet: TypeLess ist selbst-signiert und **nicht von Apple notarisiert** — dafür bräuchte es
+   ein kostenpflichtiges Entwicklerkonto. Freigeben über Systemeinstellungen → „Datenschutz &
+   Sicherheit" → dort unten „Dennoch öffnen". Wer lieber das Terminal nimmt:
+   `xattr -dr com.apple.quarantine /Applications/TypeLess.app`.
+3. **Der erste Start lädt die Modelle** (Whisper + Qwen) aus dem Hugging-Face-Hub — mehrere
+   Gigabyte, einmalig, mit Fortschrittsfenster. Danach läuft alles offline.
+4. macOS fragt nach **Mikrofon**, **Bedienungshilfen** und **Eingabeüberwachung**. Alle drei sind
+   nötig: aufnehmen, Text einfügen, die Fn-Taste mitlesen.
+5. Systemeinstellungen → Tastatur → „Beim Drücken der 🌐-Taste" auf **„Keine Aktion"** stellen
+   (s. „Voraussetzung" unten).
+
+Python oder `uv` muss man **nicht** installieren — die App bringt die Engine mitsamt `uv` im
+Bundle mit. Wer aus dem Quelltext bauen will, findet das unter [Entwicklung](#entwicklung).
+
 ## Bedienung
 
 **Fn halten, sprechen, loslassen.** Ein Overlay unten mittig zeigt den Verlauf: Live-Pegel beim
@@ -123,3 +145,9 @@ Das `.app`-Bundle ist nötig, weil macOS Mikrofon- und Bedienungshilfen-Rechte a
 Bundle-**Identität** vergibt, nicht an ein nacktes Binary. `bash scripts/setup-signing-identity.sh`
 legt einmalig eine stabile, selbst-signierte Entwickler-Identität an — danach bleiben die erteilten
 Rechte über alle Neubauten erhalten.
+
+## Lizenz
+
+[MIT](LICENSE). Die Modelle stehen unter ihren eigenen Lizenzen: `whisper-large-v3-turbo` (MIT)
+und `Qwen3-4B-Instruct-2507` (Apache-2.0); sie werden beim ersten Start geladen und sind nicht
+Teil dieses Repos.
