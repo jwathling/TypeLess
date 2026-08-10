@@ -1,0 +1,13 @@
+<?xml version='1.0' encoding='utf-8'?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+  <channel>
+    <title>TypeLess</title>
+    <item>
+      <title>0.4.0</title>
+      <sparkle:version>0.4.0</sparkle:version>
+      <sparkle:shortVersionString>0.4.0</sparkle:shortVersionString>
+      <pubDate>Mon, 10 Aug 2026 16:21:20 +0000</pubDate>
+      <enclosure url="https://github.com/jwathling/TypeLess/releases/download/0.4.0/TypeLess-0.4.0.zip" type="application/octet-stream" length="20931889" sparkle:edSignature="J6OFuCszSAn9FHu4kcVoEef9WG2wnypAhHx4gZ3KgT9YgnKhuLpNf9GKhw7YZsjVCri60VDOFCMxuYgeLYzwAA==" />
+    </item>
+  </channel>
+</rss>
