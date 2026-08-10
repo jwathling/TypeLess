@@ -1,11 +1,12 @@
 # TypeLess veröffentlichen & Schlüssel sichern
 
-> Stand: Der lokale Code für Selbst-Update (Sparkle) ist fertig. Das öffentliche GitHub-Repo und
-> der Signier-Schlüssel sind noch NICHT eingerichtet — diese Anleitung führt beim Online-Gang durch
-> beide Schritte. Bis dahin trägt die gebaute App einen Platzhalter-Update-Schlüssel und liefert
-> keine echten Updates aus.
+> Stand: Der Online-Gang ist vollzogen. Das Repo ist **öffentlich**
+> (https://github.com/jwathling/TypeLess, MIT-Lizenz), der **EdDSA-Signier-Schlüssel ist erzeugt**
+> und liegt im Schlüsselbund; `apps/macos/sparkle_public_key.txt` trägt den echten öffentlichen
+> Teil statt des früheren Platzhalters. Die Einmal-Schritte unten sind erledigt und nur noch als
+> Beleg dokumentiert — offen ist einzig die **Sicherung** der beiden Schlüssel (s. unten, Pflicht).
 
-## Einmalig beim ersten Online-Gang
+## Einmalig beim ersten Online-Gang — erledigt
 
 1. **EdDSA-Signier-Schlüssel erzeugen** (privater Teil landet im Schlüsselbund, öffentlicher in die App):
    ```bash
@@ -13,11 +14,13 @@
    "$GEN"                                   # erzeugt den privaten Schlüssel im Schlüsselbund (einmalig)
    "$GEN" -p > apps/macos/sparkle_public_key.txt   # öffentlichen Schlüssel in die App-Datei
    ```
-2. **Öffentliches Repo anlegen und pushen:**
+2. **Repo öffentlich schalten.** Das Repo existierte bereits als privates `origin` — es wurde also
+   umgeschaltet, nicht neu angelegt (`gh repo create` wäre hier falsch gewesen):
    ```bash
-   gh auth status || gh auth login
-   gh repo create TypeLess --public --source=. --remote=origin --push
+   gh repo edit jwathling/TypeLess --visibility public --accept-visibility-change-consequences
    ```
+   Vorher wurde die Historie mit `git filter-repo --mailmap` auf die GitHub-Noreply-Adresse
+   umgeschrieben, damit die privaten Mailadressen aus 356 Commits nicht öffentlich werden.
 
 ## Eine neue Version veröffentlichen
 
